@@ -1,98 +1,60 @@
-# vinext-starter
+# Reel Inbox
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+Automação para receber links de Reels enviados por Direct a uma conta profissional
+do Instagram, baixar o MP4 em segundo plano e armazená-lo no R2 com histórico no D1.
 
-## Prerequisites
+## Como funciona
 
-- Node.js `>=22.13.0`
+1. Uma pessoa compartilha um Reel por DM com a conta conectada.
+2. A API oficial da Meta envia o evento `messages` para `/instagram/webhook`.
+3. O serviço valida a assinatura e a lista permitida de remetentes.
+4. O arquivo direto da mensagem é priorizado. Para um link público, a página é
+   consultada em busca do vídeo exposto publicamente.
+5. O MP4 é guardado no R2 e aparece no painel para download.
 
-## Quick Start
+O processamento aceita somente conteúdo público. Use apenas vídeos próprios,
+licenciados ou com autorização do titular.
+
+## Configuração local
 
 ```bash
+copy .env.example .env
 npm install
 npm run dev
-npm run build
 ```
 
-This starter does not use `wrangler.jsonc`.
+Preencha:
 
-## Included Shape
+- `META_VERIFY_TOKEN`: token escolhido por você para validar o webhook.
+- `META_APP_SECRET`: segredo do aplicativo, usado para validar `X-Hub-Signature-256`.
+- `ALLOWED_IG_SENDER_IDS`: IDs autorizados, separados por vírgula. Não deixe vazio
+  em produção.
+- `REEL_RESOLVER_URL` e `REEL_RESOLVER_TOKEN`: fallback opcional para um provedor
+  com API licenciada. O endpoint recebe `{"url":"..."}` e deve retornar
+  `{"videoUrl":"..."}`.
 
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
+## Meta for Developers
 
-## Workspace Auth Headers
+1. Use uma conta Instagram Business ou Creator.
+2. Crie um app e configure **Instagram API with Instagram Login**.
+3. Solicite `instagram_business_manage_messages` e as permissões básicas exigidas.
+4. Cadastre `https://SEU-DOMINIO/instagram/webhook` como Callback URL.
+5. Use o mesmo valor de `META_VERIFY_TOKEN` no painel da Meta.
+6. Assine o campo de webhook `messages`.
 
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
+Em modo de desenvolvimento, somente contas com função no app conseguem testar.
+Para receber mensagens de usuários reais, o app e a permissão precisam passar
+pela revisão da Meta.
 
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
+## Rotas
 
-Treat the full name as optional and fall back to email when it is absent:
+- `GET/POST /instagram/webhook`: verificação e eventos da Meta.
+- `GET /api/reels`: histórico recente.
+- `POST /api/reels/manual`: teste com um link público.
+- `GET /api/reels/:id/download`: entrega o arquivo armazenado.
 
-```tsx
-import { headers } from "next/headers";
+## Por que não usar DownReels automaticamente?
 
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
-```
-
-## Optional Dispatch-Owned ChatGPT Sign-In
-
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
-
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
-
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
-
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
-
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
-
-## Useful Commands
-
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+Os termos do DownReels descrevem o serviço como manual e proíbem bots, scripts,
+scrapers e download automatizado/em massa. Integrá-lo por automação violaria essas
+condições e seria operacionalmente frágil. Por isso ele não é usado pelo projeto.
