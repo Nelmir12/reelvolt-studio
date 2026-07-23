@@ -15,6 +15,13 @@
       "when": 1784813450947,
       "tag": "0001_ambitious_prism",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1784815241588,
+      "tag": "0002_handy_mulholland_black",
+      "breakpoints": true
     }
   ]
 }

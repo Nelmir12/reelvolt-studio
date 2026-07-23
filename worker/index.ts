@@ -14,6 +14,8 @@ interface Env {
   };
   META_VERIFY_TOKEN?: string;
   META_APP_SECRET?: string;
+  ADMIN_TOKEN?: string;
+  PAIRING_CODE?: string;
   ALLOWED_IG_SENDER_IDS?: string;
   REEL_RESOLVER_URL?: string;
   REEL_RESOLVER_TOKEN?: string;
@@ -45,6 +47,10 @@ const CREATE_REELS = `CREATE TABLE IF NOT EXISTS reels (
   completed_at TEXT
 )`;
 const CREATE_REELS_INDEX = "CREATE INDEX IF NOT EXISTS reels_created_at_idx ON reels (created_at DESC)";
+const CREATE_AUTHORIZED_SENDERS = `CREATE TABLE IF NOT EXISTS authorized_senders (
+  sender_id TEXT PRIMARY KEY,
+  paired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`;
 
 function json(data: unknown, init: ResponseInit = {}) {
   const headers = new Headers(init.headers);
@@ -57,12 +63,16 @@ async function ensureDatabase(env: Env) {
   await env.DB.batch([
     env.DB.prepare(CREATE_REELS),
     env.DB.prepare(CREATE_REELS_INDEX),
+    env.DB.prepare(CREATE_AUTHORIZED_SENDERS),
   ]);
 }
 
-function allowedSender(env: Env, senderId: string) {
+async function allowedSender(env: Env, senderId: string) {
   const configured = env.ALLOWED_IG_SENDER_IDS?.split(",").map((id) => id.trim()).filter(Boolean) ?? [];
-  return configured.length === 0 || configured.includes(senderId);
+  if (configured.includes(senderId)) return true;
+  const paired = await env.DB.prepare("SELECT sender_id FROM authorized_senders WHERE sender_id = ?")
+    .bind(senderId).first();
+  return Boolean(paired);
 }
 
 function findInstagramUrl(value: unknown): string | null {
@@ -96,7 +106,7 @@ function extractMessages(payload: any): ReelInput[] {
 }
 
 async function validMetaSignature(request: Request, body: ArrayBuffer, env: Env) {
-  if (!env.META_APP_SECRET) return true;
+  if (!env.META_APP_SECRET) return false;
   const signature = request.headers.get("x-hub-signature-256");
   if (!signature?.startsWith("sha256=")) return false;
   const key = await crypto.subtle.importKey(
@@ -180,7 +190,7 @@ async function processReel(id: number, sourceUrl: string, env: Env) {
 }
 
 async function queueReel(input: ReelInput, env: Env, ctx: ExecutionContext) {
-  if (!allowedSender(env, input.senderId)) return { accepted: false, reason: "sender_not_allowed" };
+  if (!(await allowedSender(env, input.senderId))) return { accepted: false, reason: "sender_not_allowed" };
   const result = await env.DB.prepare(
     "INSERT OR IGNORE INTO reels (message_id, sender_id, source_url, status) VALUES (?, ?, ?, 'queued')",
   ).bind(input.messageId, input.senderId, input.sourceUrl).run();
@@ -191,33 +201,51 @@ async function queueReel(input: ReelInput, env: Env, ctx: ExecutionContext) {
   return { accepted: true, id: row.id };
 }
 
+function validAdmin(request: Request, env: Env) {
+  if (!env.ADMIN_TOKEN) return false;
+  return request.headers.get("authorization") === `Bearer ${env.ADMIN_TOKEN}`;
+}
+
 async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/") && url.pathname !== "/instagram/webhook") return null;
   await ensureDatabase(env);
 
   if (url.pathname === "/instagram/webhook" && request.method === "GET") {
+    if (!env.META_VERIFY_TOKEN) return new Response("Webhook não configurado", { status: 503 });
     const valid = url.searchParams.get("hub.mode") === "subscribe"
       && url.searchParams.get("hub.verify_token") === env.META_VERIFY_TOKEN;
     return valid ? new Response(url.searchParams.get("hub.challenge") ?? "") : new Response("Token inválido", { status: 403 });
   }
 
   if (url.pathname === "/instagram/webhook" && request.method === "POST") {
+    if (!env.META_APP_SECRET) return new Response("Webhook não configurado", { status: 503 });
     const body = await request.arrayBuffer();
     if (!(await validMetaSignature(request, body, env))) return new Response("Assinatura inválida", { status: 401 });
     const payload = JSON.parse(new TextDecoder().decode(body));
+    for (const entry of payload?.entry ?? []) {
+      for (const event of entry?.messaging ?? []) {
+        const senderId = String(event?.sender?.id ?? "");
+        const text = event?.message?.text;
+        if (senderId && env.PAIRING_CODE && text === env.PAIRING_CODE) {
+          await env.DB.prepare("INSERT OR IGNORE INTO authorized_senders (sender_id) VALUES (?)").bind(senderId).run();
+        }
+      }
+    }
     const messages = extractMessages(payload);
     for (const message of messages) await queueReel(message, env, ctx);
     return new Response("EVENT_RECEIVED");
   }
 
   if (url.pathname === "/api/reels" && request.method === "GET") {
+    if (!validAdmin(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
     const { results } = await env.DB.prepare(`SELECT id, sender_id, source_url, filename, content_type,
       size_bytes, status, error, created_at, completed_at FROM reels ORDER BY id DESC LIMIT 100`).all();
     return json({ reels: results, configured: Boolean(env.META_VERIFY_TOKEN), senderFilter: Boolean(env.ALLOWED_IG_SENDER_IDS) });
   }
 
   if (url.pathname === "/api/reels/manual" && request.method === "POST") {
+    if (!validAdmin(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
     const data = await request.json() as any;
     const sourceUrl = findInstagramUrl(data?.url);
     if (!sourceUrl) return json({ error: "Informe uma URL válida de Reel público." }, { status: 400 });
@@ -231,6 +259,7 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
 
   const downloadMatch = url.pathname.match(/^\/api\/reels\/(\d+)\/download$/);
   if (downloadMatch && request.method === "GET") {
+    if (!validAdmin(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
     const row = await env.DB.prepare("SELECT storage_key, filename, content_type FROM reels WHERE id = ? AND status = 'ready'")
       .bind(Number(downloadMatch[1])).first<{ storage_key: string; filename: string; content_type: string }>();
     if (!row?.storage_key) return json({ error: "Vídeo não encontrado." }, { status: 404 });

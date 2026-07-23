@@ -15,3 +15,8 @@ export const reels = sqliteTable("reels", {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   completedAt: text("completed_at"),
 });
+
+export const authorizedSenders = sqliteTable("authorized_senders", {
+  senderId: text("sender_id").primaryKey(),
+  pairedAt: text("paired_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});

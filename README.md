@@ -8,9 +8,10 @@ do Instagram, baixar o MP4 em segundo plano e armazená-lo no R2 com histórico 
 1. Uma pessoa compartilha um Reel por DM com a conta conectada.
 2. A API oficial da Meta envia o evento `messages` para `/instagram/webhook`.
 3. O serviço valida a assinatura e a lista permitida de remetentes.
-4. O arquivo direto da mensagem é priorizado. Para um link público, a página é
+4. Somente remetentes previamente pareados ou explicitamente autorizados são aceitos.
+5. O arquivo direto da mensagem é priorizado. Para um link público, a página é
    consultada em busca do vídeo exposto publicamente.
-5. O MP4 é guardado no R2 e aparece no painel para download.
+6. O MP4 é guardado no R2 e só pode ser recuperado com o token administrativo.
 
 O processamento aceita somente conteúdo público. Use apenas vídeos próprios,
 licenciados ou com autorização do titular.
@@ -27,6 +28,8 @@ Preencha:
 
 - `META_VERIFY_TOKEN`: token escolhido por você para validar o webhook.
 - `META_APP_SECRET`: segredo do aplicativo, usado para validar `X-Hub-Signature-256`.
+- `ADMIN_TOKEN`: protege histórico, teste manual e downloads.
+- `PAIRING_CODE`: primeira mensagem secreta que autoriza a conta remetente.
 - `ALLOWED_IG_SENDER_IDS`: IDs autorizados, separados por vírgula. Não deixe vazio
   em produção.
 - `REEL_RESOLVER_URL` e `REEL_RESOLVER_TOKEN`: fallback opcional para um provedor
@@ -49,9 +52,15 @@ pela revisão da Meta.
 ## Rotas
 
 - `GET/POST /instagram/webhook`: verificação e eventos da Meta.
-- `GET /api/reels`: histórico recente.
-- `POST /api/reels/manual`: teste com um link público.
-- `GET /api/reels/:id/download`: entrega o arquivo armazenado.
+- `GET /api/reels`: histórico recente, exige `Authorization: Bearer ADMIN_TOKEN`.
+- `POST /api/reels/manual`: teste protegido com um link público.
+- `GET /api/reels/:id/download`: entrega protegida do arquivo armazenado.
+
+## Pareamento do remetente
+
+Depois que o webhook estiver ativo, envie o valor exato de `PAIRING_CODE` por
+Direct para a conta profissional. O identificador daquele remetente passa a ser
+aceito; todos os demais são ignorados. O código não inicia nenhum download.
 
 ## Por que não usar DownReels automaticamente?
 
