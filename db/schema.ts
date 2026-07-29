@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 
 export const reels = sqliteTable("reels", {
@@ -44,3 +44,33 @@ export const instagramAuth = sqliteTable("instagram_auth", {
   expiresAt: integer("expires_at").notNull(),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+export const reelInsights = sqliteTable("reel_insights", {
+  reelId: integer("reel_id").primaryKey().references(() => reels.id, { onDelete: "cascade" }),
+  views: integer("views").notNull().default(0),
+  reach: integer("reach").notNull().default(0),
+  likes: integer("likes").notNull().default(0),
+  comments: integer("comments").notNull().default(0),
+  saved: integer("saved").notNull().default(0),
+  shares: integer("shares").notNull().default(0),
+  totalInteractions: integer("total_interactions").notNull().default(0),
+  averageWatchTimeMs: integer("average_watch_time_ms").notNull().default(0),
+  totalWatchTimeMs: integer("total_watch_time_ms").notNull().default(0),
+  lastError: text("last_error"),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const reelInsightSnapshots = sqliteTable("reel_insight_snapshots", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  reelId: integer("reel_id").notNull().references(() => reels.id, { onDelete: "cascade" }),
+  capturedDate: text("captured_date").notNull(),
+  views: integer("views").notNull().default(0),
+  reach: integer("reach").notNull().default(0),
+  totalInteractions: integer("total_interactions").notNull().default(0),
+  shares: integer("shares").notNull().default(0),
+  saved: integer("saved").notNull().default(0),
+  capturedAt: text("captured_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  uniqueIndex("reel_insight_snapshots_day_idx").on(table.reelId, table.capturedDate),
+  index("reel_insight_snapshots_reel_idx").on(table.reelId, table.capturedAt),
+]);

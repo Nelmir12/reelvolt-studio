@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-async function render(headers = {}) {
+async function render(headers = {}, path = "/") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}-${Math.random()}`);
   const { default: worker } = await import(workerUrl.href);
 
   return worker.fetch(
-    new Request("http://localhost/", {
+    new Request(`http://localhost${path}`, {
       headers: {
         accept: "text/html",
         "oai-authenticated-user-email": "nelmirjr@gmail.com",
@@ -44,6 +44,17 @@ test("server-renders the authenticated Reel Inbox", async () => {
   assert.doesNotMatch(html, /Telegram|Direct do Instagram|codex-preview|Building your site/i);
 });
 
+test("server-renders the analytics dashboard tab", async () => {
+  const response = await render({}, "/?view=dashboard");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Dados que viram/);
+  assert.match(html, /Visualizações totais|Carregando desempenho/);
+  assert.match(html, /Ritmo do Reel Inbox/);
+  assert.match(html, /Como buscar mais views/);
+  assert.match(html, /Desempenho por Reel/);
+});
+
 test("declares the protected intake, dashboard and official Meta publishing flow", async () => {
   const [worker, readme, manifest] = await Promise.all([
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
@@ -61,6 +72,10 @@ test("declares the protected intake, dashboard and official Meta publishing flow
   assert.match(worker, /downloadMode: "auto"/);
   assert.match(worker, /public_token/);
   assert.match(worker, /\/api\/dashboard/);
+  assert.match(worker, /\/api\/analytics/);
+  assert.match(worker, /instagram_business_manage_insights/);
+  assert.match(worker, /reel_insight_snapshots/);
+  assert.match(worker, /\"views\", \"reach\", \"likes\", \"comments\", \"saved\", \"shares\"/);
   assert.match(worker, /media_publish/);
   assert.match(worker, /reconcilePublishedReel/);
   assert.match(worker, /WHERE status <> 'failed'/);

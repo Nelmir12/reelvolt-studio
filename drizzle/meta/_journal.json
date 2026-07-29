@@ -50,6 +50,13 @@
       "when": 1785354470219,
       "tag": "0006_harsh_unicorn",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1785357425621,
+      "tag": "0007_spicy_wild_child",
+      "breakpoints": true
     }
   ]
 }

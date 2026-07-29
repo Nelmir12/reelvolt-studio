@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import AnalyticsDashboard from "./analytics-dashboard";
 
 type Reel = {
   id: number;
@@ -47,6 +48,7 @@ type InboxClientProps = {
   userEmail: string;
   signOutUrl: string;
   sharedText: string;
+  initialView: "inbox" | "dashboard";
 };
 
 const INSTAGRAM_URL = /https?:\/\/(?:www\.)?instagram\.com\/(?:reel|reels|p)\/[A-Za-z0-9_-]+[^\s<"]*/i;
@@ -119,7 +121,7 @@ function publicationModeLabel(mode: Reel["publication_mode"]) {
   return "Com aprovação";
 }
 
-export default function InboxClient({ userEmail, signOutUrl, sharedText }: InboxClientProps) {
+export default function InboxClient({ userEmail, signOutUrl, sharedText, initialView }: InboxClientProps) {
   const initialUrl = useMemo(() => extractSharedUrl(sharedText), [sharedText]);
   const [url, setUrl] = useState(initialUrl);
   const [sourceAccount, setSourceAccount] = useState("");
@@ -132,6 +134,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText }: Inbox
   const [submitting, setSubmitting] = useState(false);
   const [publishingId, setPublishingId] = useState<number | null>(null);
   const [notice, setNotice] = useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
+  const [activeView, setActiveView] = useState<"inbox" | "dashboard">(initialView);
 
   const loadData = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -244,13 +247,14 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText }: Inbox
     }
   }
 
-  const metrics = [
-    { label: "Recebidos", value: dashboard.metrics.total, note: `${dashboard.metrics.last_seven_days} nos últimos 7 dias` },
-    { label: "MP4 prontos", value: dashboard.metrics.ready, note: formatBytes(dashboard.metrics.stored_bytes) },
-    { label: "Para aprovar", value: dashboard.metrics.awaiting_approval, note: "aguardando sua decisão" },
-    { label: "Publicando", value: dashboard.metrics.publishing, note: "processando agora" },
-    { label: "Publicados", value: dashboard.metrics.published, note: dashboard.metrics.failed ? `${dashboard.metrics.failed} com falha` : "sem falhas" },
-  ];
+  function switchView(view: "inbox" | "dashboard") {
+    setActiveView(view);
+    const nextUrl = new URL(window.location.href);
+    if (view === "dashboard") nextUrl.searchParams.set("view", "dashboard");
+    else nextUrl.searchParams.delete("view");
+    window.history.replaceState({}, "", `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
 
   return (
     <main className="studio-shell">
@@ -259,12 +263,39 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText }: Inbox
           <span className="brand-mark">BT</span>
           <span><strong>REELVOLT</strong><small>BT SUPPLY STUDIO</small></span>
         </div>
-        <div className="account">
-          <span>{userEmail}</span>
-          <a href={signOutUrl}>Sair</a>
+        <div className="topbar-actions">
+          <nav className="view-tabs" aria-label="Áreas do ReelVolt">
+            <button
+              type="button"
+              className={activeView === "inbox" ? "active" : ""}
+              aria-current={activeView === "inbox" ? "page" : undefined}
+              onClick={() => switchView("inbox")}
+            >
+              Produção
+            </button>
+            <button
+              type="button"
+              className={activeView === "dashboard" ? "active" : ""}
+              aria-current={activeView === "dashboard" ? "page" : undefined}
+              onClick={() => switchView("dashboard")}
+            >
+              Dashboard
+            </button>
+          </nav>
+          <div className="account">
+            <span>{userEmail}</span>
+            <a href={signOutUrl}>Sair</a>
+          </div>
         </div>
       </header>
 
+      {activeView === "dashboard" ? (
+        <AnalyticsDashboard
+          account={dashboard.settings.account}
+          operations={dashboard.metrics}
+        />
+      ) : (
+        <>
       <section className="hero">
         <div className="hero-copy">
           <span className="eyebrow">REEL INBOX · PAINEL PRIVADO</span>
@@ -285,16 +316,6 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText }: Inbox
             </small>
           </div>
         </div>
-      </section>
-
-      <section className="metrics-grid" aria-label="Resumo do painel">
-        {metrics.map((metric) => (
-          <article className="metric-card" key={metric.label}>
-            <span>{metric.label}</span>
-            <strong>{metric.value}</strong>
-            <small>{metric.note}</small>
-          </article>
-        ))}
       </section>
 
       {notice ? <div className={`global-notice ${notice.tone}`} role="status">{notice.text}</div> : null}
@@ -475,6 +496,8 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText }: Inbox
           </div>
         )}
       </section>
+        </>
+      )}
 
       <footer>
         <span>Instagram</span><i>→</i><span>Reel Inbox</span><i>→</i><span>MP4</span><i>→</i><span>Aprovação</span><i>→</i><span>@btsupply_</span>

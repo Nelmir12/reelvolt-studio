@@ -21,6 +21,8 @@ parte do fluxo operacional.
    worker.
 7. Para publicar, o worker cria um contêiner de Reel, acompanha o processamento
    e chama `media_publish` na API oficial da Meta.
+8. A aba Dashboard consulta Insights oficiais, soma visualizações e interações,
+   cria um ranking por Reel e registra uma amostra diária no D1.
 
 Use somente vídeos próprios, licenciados ou autorizados pelo titular.
 
@@ -43,7 +45,8 @@ As variáveis estão documentadas em `.env.example`:
   validade de duas horas.
 
 Com Instagram Login, o token precisa das permissões
-`instagram_business_basic` e `instagram_business_content_publish`.
+`instagram_business_basic`, `instagram_business_content_publish` e
+`instagram_business_manage_insights`.
 
 ## Rotas principais
 
@@ -51,6 +54,9 @@ Com Instagram Login, o token precisa das permissões
 - `POST /api/reels/intake`: recebe um Reel e as opções de fluxo.
 - `GET /api/reels`: lista os registros recentes.
 - `GET /api/dashboard`: retorna métricas e estado das integrações.
+- `GET /api/analytics`: retorna visualizações, alcance, interações, histórico e
+  recomendações.
+- `POST /api/analytics/refresh`: solicita uma nova leitura de Insights na Meta.
 - `POST /api/reels/:id/publish`: aprova, retoma ou repete uma publicação.
 - `GET /download/:token`: entrega o MP4 ao usuário.
 - `GET /publish-media/:id.mp4`: link temporário assinado consumido pela Meta.

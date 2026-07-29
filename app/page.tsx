@@ -13,7 +13,7 @@ function first(value: string | string[] | undefined) {
 
 function safeReturnTo(searchParams: Record<string, string | string[] | undefined>) {
   const params = new URLSearchParams();
-  for (const key of ["url", "text", "title"]) {
+  for (const key of ["url", "text", "title", "view"]) {
     const value = first(searchParams[key]);
     if (value) params.set(key, value.slice(0, 2000));
   }
@@ -36,6 +36,7 @@ async function AuthenticatedInbox({ searchParams }: HomeProps) {
       userEmail={user.email}
       signOutUrl={chatGPTSignOutPath("/")}
       sharedText={sharedText}
+      initialView={first(resolved.view) === "dashboard" ? "dashboard" : "inbox"}
     />
   );
 }

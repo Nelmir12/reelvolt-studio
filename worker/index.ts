@@ -97,6 +97,17 @@ type InstagramPublishedMedia = {
   media_product_type?: string;
 };
 
+type InstagramInsightResult = {
+  name: string;
+  values?: Array<{ value?: number }>;
+  total_value?: { value?: number };
+};
+
+type PublishedReelInsightTarget = {
+  id: number;
+  instagram_media_id: string;
+};
+
 const FIXED_CAPTION = "V arrived at #VogueWorld: Hollywood in unmistakable style, enjoying the live performances while showcasing the effortless elegance he's become known for. Another runway-worthy moment. #Taehyung";
 const COVER_PATH = "/reel-cover.jpg";
 const PUBLICATION_MODES = new Set<PublicationMode>(["download_only", "approval", "auto"]);
@@ -160,6 +171,35 @@ const CREATE_INSTAGRAM_AUTH = `CREATE TABLE IF NOT EXISTS instagram_auth (
   expires_at INTEGER NOT NULL,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`;
+const CREATE_REEL_INSIGHTS = `CREATE TABLE IF NOT EXISTS reel_insights (
+  reel_id INTEGER PRIMARY KEY,
+  views INTEGER NOT NULL DEFAULT 0,
+  reach INTEGER NOT NULL DEFAULT 0,
+  likes INTEGER NOT NULL DEFAULT 0,
+  comments INTEGER NOT NULL DEFAULT 0,
+  saved INTEGER NOT NULL DEFAULT 0,
+  shares INTEGER NOT NULL DEFAULT 0,
+  total_interactions INTEGER NOT NULL DEFAULT 0,
+  average_watch_time_ms INTEGER NOT NULL DEFAULT 0,
+  total_watch_time_ms INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (reel_id) REFERENCES reels(id) ON DELETE CASCADE
+)`;
+const CREATE_REEL_INSIGHT_SNAPSHOTS = `CREATE TABLE IF NOT EXISTS reel_insight_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  reel_id INTEGER NOT NULL,
+  captured_date TEXT NOT NULL,
+  views INTEGER NOT NULL DEFAULT 0,
+  reach INTEGER NOT NULL DEFAULT 0,
+  total_interactions INTEGER NOT NULL DEFAULT 0,
+  shares INTEGER NOT NULL DEFAULT 0,
+  saved INTEGER NOT NULL DEFAULT 0,
+  captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (reel_id) REFERENCES reels(id) ON DELETE CASCADE
+)`;
+const CREATE_REEL_INSIGHTS_DAY_INDEX = "CREATE UNIQUE INDEX IF NOT EXISTS reel_insight_snapshots_day_idx ON reel_insight_snapshots (reel_id, captured_date)";
+const CREATE_REEL_INSIGHTS_REEL_INDEX = "CREATE INDEX IF NOT EXISTS reel_insight_snapshots_reel_idx ON reel_insight_snapshots (reel_id, captured_at)";
 
 function json(data: unknown, init: ResponseInit = {}) {
   const headers = new Headers(init.headers);
@@ -177,6 +217,10 @@ async function ensureDatabase(env: Env) {
     env.DB.prepare(CREATE_REELS_PUBLIC_TOKEN_INDEX),
     env.DB.prepare(CREATE_AUTHORIZED_SENDERS),
     env.DB.prepare(CREATE_INSTAGRAM_AUTH),
+    env.DB.prepare(CREATE_REEL_INSIGHTS),
+    env.DB.prepare(CREATE_REEL_INSIGHT_SNAPSHOTS),
+    env.DB.prepare(CREATE_REEL_INSIGHTS_DAY_INDEX),
+    env.DB.prepare(CREATE_REEL_INSIGHTS_REEL_INDEX),
   ]);
 
   const { results } = await env.DB.prepare("PRAGMA table_info(reels)").all<{ name: string }>();
@@ -508,6 +552,138 @@ async function graphRequest(
   return result;
 }
 
+function insightValue(result: InstagramInsightResult | undefined) {
+  const value = result?.total_value?.value ?? result?.values?.[0]?.value ?? 0;
+  return Number.isFinite(Number(value)) ? Math.max(0, Math.round(Number(value))) : 0;
+}
+
+async function mediaInsightRequest(
+  mediaId: string,
+  metrics: string[],
+  env: Env,
+) {
+  const credentials = await instagramCredentials(env);
+  const values = new URLSearchParams({
+    metric: metrics.join(","),
+    access_token: credentials.accessToken,
+  });
+  const response = await fetch(
+    `${metaBaseUrl(env)}/${encodeURIComponent(mediaId)}/insights?${values.toString()}`,
+  );
+  const result = await response.json() as {
+    data?: InstagramInsightResult[];
+    error?: { message?: string; code?: number; error_subcode?: number };
+  };
+  if (!response.ok || result.error) {
+    const details = result.error?.code ? ` (Meta ${result.error.code})` : "";
+    throw new Error(`${result.error?.message || "A Meta não disponibilizou os Insights deste Reel."}${details}`);
+  }
+  return new Map((result.data || []).map((metric) => [metric.name, insightValue(metric)]));
+}
+
+async function saveInsightError(reelId: number, error: unknown, env: Env) {
+  const message = error instanceof Error ? error.message : "Falha desconhecida ao consultar os Insights.";
+  await env.DB.prepare(`INSERT INTO reel_insights (reel_id, last_error, updated_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(reel_id) DO UPDATE SET last_error = excluded.last_error,
+      updated_at = CURRENT_TIMESTAMP`)
+    .bind(reelId, message.slice(0, 500))
+    .run();
+}
+
+async function refreshReelInsights(target: PublishedReelInsightTarget, env: Env) {
+  try {
+    const primary = await mediaInsightRequest(
+      target.instagram_media_id,
+      ["views", "reach", "likes", "comments", "saved", "shares", "total_interactions"],
+      env,
+    );
+    let watch = new Map<string, number>();
+    try {
+      watch = await mediaInsightRequest(
+        target.instagram_media_id,
+        ["ig_reels_avg_watch_time", "ig_reels_video_view_total_time"],
+        env,
+      );
+    } catch (error) {
+      console.warn(`As métricas de retenção do Reel #${target.id} não estão disponíveis:`, error);
+    }
+
+    const likes = primary.get("likes") || 0;
+    const comments = primary.get("comments") || 0;
+    const saved = primary.get("saved") || 0;
+    const shares = primary.get("shares") || 0;
+    const totalInteractions = primary.get("total_interactions")
+      || likes + comments + saved + shares;
+    const metrics = {
+      views: primary.get("views") || 0,
+      reach: primary.get("reach") || 0,
+      likes,
+      comments,
+      saved,
+      shares,
+      totalInteractions,
+      averageWatchTimeMs: watch.get("ig_reels_avg_watch_time") || 0,
+      totalWatchTimeMs: watch.get("ig_reels_video_view_total_time") || 0,
+    };
+
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO reel_insights
+        (reel_id, views, reach, likes, comments, saved, shares, total_interactions,
+         average_watch_time_ms, total_watch_time_ms, last_error, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
+        ON CONFLICT(reel_id) DO UPDATE SET views = excluded.views, reach = excluded.reach,
+          likes = excluded.likes, comments = excluded.comments, saved = excluded.saved,
+          shares = excluded.shares, total_interactions = excluded.total_interactions,
+          average_watch_time_ms = excluded.average_watch_time_ms,
+          total_watch_time_ms = excluded.total_watch_time_ms, last_error = NULL,
+          updated_at = CURRENT_TIMESTAMP`)
+        .bind(
+          target.id,
+          metrics.views,
+          metrics.reach,
+          metrics.likes,
+          metrics.comments,
+          metrics.saved,
+          metrics.shares,
+          metrics.totalInteractions,
+          metrics.averageWatchTimeMs,
+          metrics.totalWatchTimeMs,
+        ),
+      env.DB.prepare(`INSERT INTO reel_insight_snapshots
+        (reel_id, captured_date, views, reach, total_interactions, shares, saved, captured_at)
+        VALUES (?, date('now'), ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(reel_id, captured_date) DO UPDATE SET views = excluded.views,
+          reach = excluded.reach, total_interactions = excluded.total_interactions,
+          shares = excluded.shares, saved = excluded.saved, captured_at = CURRENT_TIMESTAMP`)
+        .bind(
+          target.id,
+          metrics.views,
+          metrics.reach,
+          metrics.totalInteractions,
+          metrics.shares,
+          metrics.saved,
+        ),
+    ]);
+    return true;
+  } catch (error) {
+    await saveInsightError(target.id, error, env);
+    return false;
+  }
+}
+
+async function refreshAllInsights(env: Env) {
+  const { results } = await env.DB.prepare(`SELECT id, instagram_media_id FROM reels
+    WHERE publish_status = 'published' AND instagram_media_id IS NOT NULL
+    ORDER BY published_at DESC LIMIT 100`)
+    .all<PublishedReelInsightTarget>();
+  let updated = 0;
+  for (const target of results) {
+    if (await refreshReelInsights(target, env)) updated += 1;
+  }
+  return { total: results.length, updated };
+}
+
 function databaseTimestamp(value: string | null) {
   if (!value) return Number.NaN;
   return Date.parse(value.includes("T") ? value : `${value.replace(" ", "T")}Z`);
@@ -834,6 +1010,176 @@ async function dashboard(env: Env, baseUrl: string) {
   };
 }
 
+async function analyticsDashboard(env: Env, baseUrl: string) {
+  const { results } = await env.DB.prepare(`SELECT
+    r.id, r.source_account, r.source_url, r.instagram_media_id, r.instagram_permalink,
+    r.published_at, r.created_at,
+    COALESCE(i.views, 0) AS views, COALESCE(i.reach, 0) AS reach,
+    COALESCE(i.likes, 0) AS likes, COALESCE(i.comments, 0) AS comments,
+    COALESCE(i.saved, 0) AS saved, COALESCE(i.shares, 0) AS shares,
+    COALESCE(i.total_interactions, 0) AS total_interactions,
+    COALESCE(i.average_watch_time_ms, 0) AS average_watch_time_ms,
+    COALESCE(i.total_watch_time_ms, 0) AS total_watch_time_ms,
+    i.last_error, i.updated_at
+    FROM reels r LEFT JOIN reel_insights i ON i.reel_id = r.id
+    WHERE r.publish_status = 'published' AND r.instagram_media_id IS NOT NULL
+    ORDER BY views DESC, r.published_at DESC`).all<{
+      id: number;
+      source_account: string | null;
+      source_url: string;
+      instagram_media_id: string;
+      instagram_permalink: string | null;
+      published_at: string | null;
+      created_at: string;
+      views: number;
+      reach: number;
+      likes: number;
+      comments: number;
+      saved: number;
+      shares: number;
+      total_interactions: number;
+      average_watch_time_ms: number;
+      total_watch_time_ms: number;
+      last_error: string | null;
+      updated_at: string | null;
+    }>();
+  const { results: historyRows } = await env.DB.prepare(`SELECT captured_date,
+    SUM(views) AS views, SUM(reach) AS reach, SUM(total_interactions) AS total_interactions,
+    SUM(shares) AS shares, SUM(saved) AS saved
+    FROM reel_insight_snapshots GROUP BY captured_date
+    ORDER BY captured_date DESC LIMIT 30`).all<{
+      captured_date: string;
+      views: number;
+      reach: number;
+      total_interactions: number;
+      shares: number;
+      saved: number;
+    }>();
+
+  const totals = results.reduce((sum, row) => ({
+    views: sum.views + Number(row.views || 0),
+    reach: sum.reach + Number(row.reach || 0),
+    likes: sum.likes + Number(row.likes || 0),
+    comments: sum.comments + Number(row.comments || 0),
+    saved: sum.saved + Number(row.saved || 0),
+    shares: sum.shares + Number(row.shares || 0),
+    interactions: sum.interactions + Number(row.total_interactions || 0),
+    watchTimeMs: sum.watchTimeMs + Number(row.total_watch_time_ms || 0),
+  }), {
+    views: 0,
+    reach: 0,
+    likes: 0,
+    comments: 0,
+    saved: 0,
+    shares: 0,
+    interactions: 0,
+    watchTimeMs: 0,
+  });
+  const successful = results.filter((row) => row.updated_at && !row.last_error);
+  const attempted = results.filter((row) => row.updated_at);
+  const lastSyncedAt = successful.map((row) => row.updated_at as string).sort().at(-1) || null;
+  const lastAttemptAt = attempted.map((row) => row.updated_at as string).sort().at(-1) || null;
+  const permissionRequired = results.some((row) =>
+    /permission|permissão|access token|OAuthException|not authorized|Meta 10\b/i.test(row.last_error || ""));
+  const attemptTimestamp = databaseTimestamp(lastAttemptAt);
+  const refreshDue = results.length > 0 && (
+    !Number.isFinite(attemptTimestamp)
+    || Date.now() - attemptTimestamp > 15 * 60 * 1000
+  );
+  const averageViews = results.length ? Math.round(totals.views / results.length) : 0;
+  const engagementRate = totals.reach ? (totals.interactions / totals.reach) * 100 : 0;
+  const shareRate = totals.views ? (totals.shares / totals.views) * 100 : 0;
+  const saveRate = totals.views ? (totals.saved / totals.views) * 100 : 0;
+  const recommendations: Array<{ title: string; body: string; tone: string }> = [];
+
+  if (!successful.length) {
+    recommendations.push({
+      title: "Libere os Insights",
+      body: "Autorize a leitura de métricas da conta para transformar publicações em decisões baseadas em visualizações reais.",
+      tone: "setup",
+    });
+  } else {
+    const top = results[0];
+    if (top && totals.views > 0 && top.views / totals.views >= 0.4) {
+      recommendations.push({
+        title: `Use o Reel #${top.id} como referência`,
+        body: `Ele concentra ${Math.round((top.views / totals.views) * 100)}% das visualizações. Repita o tipo de abertura, ritmo e assunto antes de alterar muitos elementos ao mesmo tempo.`,
+        tone: "growth",
+      });
+    }
+    if (shareRate < 1) {
+      recommendations.push({
+        title: "Aumente o potencial de compartilhamento",
+        body: "A taxa de compartilhamento está abaixo de 1% das visualizações. Priorize uma situação reconhecível já nos primeiros segundos e um desfecho que dê vontade de enviar a alguém.",
+        tone: "action",
+      });
+    } else {
+      recommendations.push({
+        title: "Compartilhamentos estão puxando o alcance",
+        body: `A taxa atual é ${shareRate.toFixed(1).replace(".", ",")}% por visualização. Preserve o formato dos Reels mais compartilhados e teste apenas uma variável por publicação.`,
+        tone: "growth",
+      });
+    }
+    if (saveRate < 0.5) {
+      recommendations.push({
+        title: "Teste conteúdo que mereça ser revisto",
+        body: "Inclua detalhes visuais, listas curtas ou uma virada rápida que incentive o público a salvar e assistir novamente.",
+        tone: "action",
+      });
+    }
+    if (results.length < 5) {
+      recommendations.push({
+        title: "Amostra ainda pequena",
+        body: "Evite conclusões definitivas. Publique pelo menos cinco Reels no mesmo padrão e compare visualizações nas primeiras 24 e 72 horas.",
+        tone: "context",
+      });
+    }
+  }
+
+  return {
+    summary: {
+      published_reels: results.length,
+      total_views: totals.views,
+      average_views: averageViews,
+      total_reach: totals.reach,
+      total_interactions: totals.interactions,
+      engagement_rate: Number(engagementRate.toFixed(2)),
+      share_rate: Number(shareRate.toFixed(2)),
+      save_rate: Number(saveRate.toFixed(2)),
+      total_watch_time_ms: totals.watchTimeMs,
+    },
+    reels: results.map((row, index) => ({
+      ...row,
+      rank: index + 1,
+      cover_url: `${baseUrl}${COVER_PATH}`,
+      engagement_rate: row.reach
+        ? Number(((row.total_interactions / row.reach) * 100).toFixed(2))
+        : 0,
+      share_rate: row.views ? Number(((row.shares / row.views) * 100).toFixed(2)) : 0,
+      save_rate: row.views ? Number(((row.saved / row.views) * 100).toFixed(2)) : 0,
+      last_error: undefined,
+    })),
+    history: historyRows.reverse(),
+    recommendations,
+    sync: {
+      status: permissionRequired
+        ? "permission_required"
+        : successful.length
+          ? "connected"
+          : results.length
+            ? "waiting"
+            : "empty",
+      last_synced_at: lastSyncedAt,
+      last_attempt_at: lastAttemptAt,
+      refresh_due: refreshDue,
+      permission_required: permissionRequired,
+      message: permissionRequired
+        ? "A conta precisa autorizar instagram_business_manage_insights."
+        : null,
+    },
+  };
+}
+
 async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<Response | null> {
   const url = new URL(request.url);
   const isPublicDownload = /^\/download\/[0-9a-f-]{36}$/i.test(url.pathname);
@@ -864,6 +1210,31 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
   if (url.pathname === "/api/dashboard" && request.method === "GET") {
     if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
     return json(await dashboard(env, baseUrl));
+  }
+
+  if (url.pathname === "/api/analytics" && request.method === "GET") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    const data = await analyticsDashboard(env, baseUrl);
+    if (data.sync.refresh_due && metaConnected(env)) {
+      ctx.waitUntil(refreshAllInsights(env));
+    }
+    return json({
+      ...data,
+      sync: {
+        ...data.sync,
+        refreshing: data.sync.refresh_due && metaConnected(env),
+      },
+    });
+  }
+
+  if (url.pathname === "/api/analytics/refresh" && request.method === "POST") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    if (!metaConnected(env)) {
+      return json({ error: "A conta @btsupply_ ainda precisa ser conectada à Meta." }, { status: 503 });
+    }
+    ctx.waitUntil(refreshAllInsights(env));
+    return json({ accepted: true }, { status: 202 });
   }
 
   if (url.pathname === "/api/reels/intake" && request.method === "POST") {
