@@ -59,7 +59,7 @@ const DOWNLOAD_LABELS: Record<string, string> = {
 };
 
 const PUBLISH_LABELS: Record<string, string> = {
-  not_requested: "Somente download",
+  not_requested: "Publicação disponível",
   awaiting_download: "Aguardando MP4",
   awaiting_approval: "Aguardando aprovação",
   awaiting_setup: "Aguardando conexão",
@@ -419,7 +419,6 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText }: Inbox
             {reels.map((reel) => {
               const canPublish = reel.status === "ready"
                 && reel.publish_status !== "published"
-                && reel.publish_status !== "not_requested"
                 && !["creating", "publishing"].includes(reel.publish_status);
               return (
                 <article className="reel-row" key={reel.id}>
