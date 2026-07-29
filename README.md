@@ -64,6 +64,9 @@ npm install
 npm run dev
 ```
 
+Para continuar o projeto em outra máquina usando o Codex, consulte
+[`CONTINUAR-NO-CODEX.md`](CONTINUAR-NO-CODEX.md).
+
 ## Observações
 
 O canal de entrada não altera as restrições técnicas do Instagram. O serviço
