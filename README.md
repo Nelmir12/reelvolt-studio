@@ -1,22 +1,64 @@
-# Reel Inbox
+# BT Supply Reel Inbox
 
-Automação para receber links de Reels enviados por Direct a uma conta profissional
-do Instagram, baixar o MP4 em segundo plano e armazená-lo no R2 com histórico no D1.
+Caixa de entrada privada e instalável para receber links de Reels, baixar o MP4,
+armazenar o arquivo e registrar o andamento no Notion. A publicação permanece
+manual.
 
-## Como funciona
+## Fluxo
 
-1. Uma pessoa compartilha um Reel por DM com a conta conectada.
-2. A API oficial da Meta envia o evento `messages` para `/instagram/webhook`.
-3. O serviço valida a assinatura e a lista permitida de remetentes.
-4. Somente remetentes previamente pareados ou explicitamente autorizados são aceitos.
-5. O arquivo direto da mensagem é priorizado. Para um link público, a página é
-   consultada em busca do vídeo exposto publicamente.
-6. O MP4 é guardado no R2 e só pode ser recuperado com o token administrativo.
+1. No Android, o usuário instala o site como aplicativo e compartilha um Reel
+   diretamente para **Reel Inbox**. Em outros aparelhos, copia e cola o link.
+2. O site exige autenticação com ChatGPT e permite somente e-mails autorizados.
+3. O usuário informa a conta de origem, observações e confirma os direitos de uso.
+4. Links repetidos são identificados antes do download.
+5. O serviço tenta localizar o MP4 público do Reel.
+6. O arquivo é armazenado no R2 e os metadados ficam no D1.
+7. O registro correspondente é criado e atualizado no Notion.
 
-O processamento aceita somente conteúdo público. Use apenas vídeos próprios,
-licenciados ou com autorização do titular.
+Use somente vídeos próprios, licenciados ou autorizados pelo titular.
 
-## Configuração local
+## Configuração
+
+As variáveis estão documentadas em `.env.example`:
+
+- `ADMIN_TOKEN`: protege diagnósticos e testes administrativos.
+- `PUBLIC_BASE_URL`: endereço público do serviço.
+- `INBOX_ALLOWED_EMAILS`: e-mails do ChatGPT autorizados, separados por vírgula.
+- `NOTION_TOKEN`: token da integração interna do Notion.
+- `NOTION_DATABASE_ID`: ID do banco **BT Supply — Reel Inbox**.
+- `REEL_RESOLVER_URL` e `REEL_RESOLVER_TOKEN`: fallback opcional e licenciado
+  quando o Instagram não disponibilizar o arquivo publicamente.
+
+## Banco do Notion
+
+| Propriedade | Tipo |
+| --- | --- |
+| Nome | Título |
+| URL | URL |
+| Status | Seleção |
+| Regras | Texto |
+| Origem | Seleção |
+| ID | Número |
+| MP4 | URL |
+| Erro | Texto |
+| Conta de origem | Texto |
+| Direitos confirmados | Checkbox |
+
+`Origem` usa o valor `Web`. Os status são `Na fila`, `Baixando`, `Pronto` e
+`Falhou`.
+
+## Rotas
+
+- `GET /`: caixa de entrada autenticada.
+- `POST /api/reels/intake`: recebe um Reel pela interface.
+- `GET /api/reels`: lista os últimos registros.
+- `GET /api/inbox/status`: mostra o estado das integrações para o usuário.
+- `GET /download/:token`: entrega o MP4 por um link secreto registrado no Notion.
+- `GET /api/integrations/status`: diagnóstico administrativo.
+- `POST /api/reels/manual`: teste administrativo.
+- `GET /api/reels/:id/download`: download administrativo.
+
+## Desenvolvimento local
 
 ```bash
 copy .env.example .env
@@ -24,46 +66,9 @@ npm install
 npm run dev
 ```
 
-Preencha:
+## Limitação do download
 
-- `META_VERIFY_TOKEN`: token escolhido por você para validar o webhook.
-- `META_APP_SECRET`: segredo do aplicativo, usado para validar `X-Hub-Signature-256`.
-- `ADMIN_TOKEN`: protege histórico, teste manual e downloads.
-- `PAIRING_CODE`: primeira mensagem secreta que autoriza a conta remetente.
-- `ALLOWED_IG_SENDER_IDS`: IDs autorizados, separados por vírgula. Não deixe vazio
-  em produção.
-- `REEL_RESOLVER_URL` e `REEL_RESOLVER_TOKEN`: fallback opcional para um provedor
-  com API licenciada. O endpoint recebe `{"url":"..."}` e deve retornar
-  `{"videoUrl":"..."}`.
-
-## Meta for Developers
-
-1. Use uma conta Instagram Business ou Creator.
-2. Crie um app e configure **Instagram API with Instagram Login**.
-3. Solicite `instagram_business_manage_messages` e as permissões básicas exigidas.
-4. Cadastre `https://SEU-DOMINIO/instagram/webhook` como Callback URL.
-5. Use o mesmo valor de `META_VERIFY_TOKEN` no painel da Meta.
-6. Assine o campo de webhook `messages`.
-
-Em modo de desenvolvimento, somente contas com função no app conseguem testar.
-Para receber mensagens de usuários reais, o app e a permissão precisam passar
-pela revisão da Meta.
-
-## Rotas
-
-- `GET/POST /instagram/webhook`: verificação e eventos da Meta.
-- `GET /api/reels`: histórico recente, exige `Authorization: Bearer ADMIN_TOKEN`.
-- `POST /api/reels/manual`: teste protegido com um link público.
-- `GET /api/reels/:id/download`: entrega protegida do arquivo armazenado.
-
-## Pareamento do remetente
-
-Depois que o webhook estiver ativo, envie o valor exato de `PAIRING_CODE` por
-Direct para a conta profissional. O identificador daquele remetente passa a ser
-aceito; todos os demais são ignorados. O código não inicia nenhum download.
-
-## Por que não usar DownReels automaticamente?
-
-Os termos do DownReels descrevem o serviço como manual e proíbem bots, scripts,
-scrapers e download automatizado/em massa. Integrá-lo por automação violaria essas
-condições e seria operacionalmente frágil. Por isso ele não é usado pelo projeto.
+O canal de entrada não altera as restrições técnicas do Instagram. O serviço
+tenta primeiro o vídeo exposto publicamente e aceita um resolvedor externo
+próprio ou licenciado como fallback. Sites que proíbem bots, scripts ou acesso
+automatizado não devem ser usados como resolvedores.

@@ -1,19 +1,45 @@
-export default function Home() {
+import { chatGPTSignOutPath, requireChatGPTUser } from "./chatgpt-auth";
+import InboxClient from "./inbox-client";
+
+export const dynamic = "force-dynamic";
+
+type HomeProps = {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+};
+
+function first(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] ?? "" : value ?? "";
+}
+
+function safeReturnTo(searchParams: Record<string, string | string[] | undefined>) {
+  const params = new URLSearchParams();
+  for (const key of ["url", "text", "title"]) {
+    const value = first(searchParams[key]);
+    if (value) params.set(key, value.slice(0, 2000));
+  }
+  const query = params.toString();
+  return query ? `/?${query}` : "/";
+}
+
+async function AuthenticatedInbox({ searchParams }: HomeProps) {
+  const resolved = await searchParams;
+  const returnTo = safeReturnTo(resolved);
+  const user = await requireChatGPTUser(returnTo);
+  const sharedText = [
+    first(resolved.url),
+    first(resolved.text),
+    first(resolved.title),
+  ].filter(Boolean).join("\n");
+
   return (
-    <main className="service-shell">
-      <section className="service-card">
-        <div className="brand"><span>BT</span> SUPPLY</div>
-        <span className="eyebrow">SERVIÇO DE AUTOMAÇÃO</span>
-        <h1>Reel Inbox está ativo.</h1>
-        <p>
-          Este endereço recebe eventos autenticados da Meta para a conta
-          <strong> @btsupply_</strong>. O histórico e os arquivos não são públicos.
-        </p>
-        <div className="service-flow" aria-label="Fluxo do serviço">
-          <span>Direct</span><i>→</i><span>Validação</span><i>→</i><span>MP4 protegido</span>
-        </div>
-        <small>Somente conteúdo público e autorizado é processado.</small>
-      </section>
-    </main>
+    <InboxClient
+      userEmail={user.email}
+      signOutUrl={chatGPTSignOutPath("/")}
+      sharedText={sharedText}
+    />
   );
+}
+
+export default function Home(props: HomeProps) {
+  return <AuthenticatedInbox {...props} />;
 }

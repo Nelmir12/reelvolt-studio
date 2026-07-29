@@ -1,5 +1,5 @@
 declare module "cloudflare:workers" {
-  export const env: any;
+  export const env: unknown;
 }
 
 type Fetcher = {

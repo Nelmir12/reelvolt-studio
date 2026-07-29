@@ -1,0 +1,30 @@
+{
+  "name": "BT Supply Reel Inbox",
+  "short_name": "Reel Inbox",
+  "description": "Receba Reels autorizados, baixe o MP4 e registre o andamento no Notion.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#11120f",
+  "theme_color": "#d8ff5d",
+  "lang": "pt-BR",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "share_target": {
+    "action": "/",
+    "method": "GET",
+    "enctype": "application/x-www-form-urlencoded",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  }
+}
