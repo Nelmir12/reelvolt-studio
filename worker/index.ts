@@ -66,6 +66,8 @@ type ReelRecord = {
   caption: string | null;
   publish_status: string;
   instagram_container_id: string | null;
+  publish_requested_at: string | null;
+  created_at: string;
 };
 
 type ReelListRow = ReelRecord & {
@@ -84,6 +86,15 @@ type InstagramCredentials = {
   accessToken: string;
   userId: string;
   expiresAt: number;
+};
+
+type InstagramPublishedMedia = {
+  id: string;
+  caption?: string;
+  permalink?: string;
+  timestamp?: string;
+  media_type?: string;
+  media_product_type?: string;
 };
 
 const FIXED_CAPTION = "V arrived at #VogueWorld: Hollywood in unmistakable style, enjoying the live performances while showcasing the effortless elegance he's become known for. Another runway-worthy moment. #Taehyung";
@@ -497,6 +508,61 @@ async function graphRequest(
   return result;
 }
 
+function databaseTimestamp(value: string | null) {
+  if (!value) return Number.NaN;
+  return Date.parse(value.includes("T") ? value : `${value.replace(" ", "T")}Z`);
+}
+
+async function reconcilePublishedReel(record: ReelRecord, env: Env) {
+  const credentials = await instagramCredentials(env);
+  const values = new URLSearchParams({
+    fields: "id,caption,permalink,timestamp,media_type,media_product_type",
+    limit: "50",
+    access_token: credentials.accessToken,
+  });
+  const response = await fetch(
+    `${metaBaseUrl(env)}/${credentials.userId}/media?${values.toString()}`,
+  );
+  const result = await response.json() as {
+    data?: InstagramPublishedMedia[];
+    error?: { message?: string; code?: number };
+  };
+  if (!response.ok || result.error) {
+    const details = result.error?.code ? ` (Meta ${result.error.code})` : "";
+    throw new Error(`${result.error?.message || "Não foi possível consultar as publicações recentes."}${details}`);
+  }
+
+  const expectedCaption = (record.caption || FIXED_CAPTION).trim();
+  const requestedAt = databaseTimestamp(record.publish_requested_at || record.created_at);
+  const earliestMatch = Number.isFinite(requestedAt)
+    ? requestedAt - 15 * 60 * 1000
+    : Date.now() - 24 * 60 * 60 * 1000;
+  const latestMatch = Date.now() + 5 * 60 * 1000;
+  const match = (result.data || [])
+    .filter((media) => {
+      const publishedAt = Date.parse(media.timestamp || "");
+      const isVideo = !media.media_type || media.media_type === "VIDEO";
+      return isVideo
+        && media.caption?.trim() === expectedCaption
+        && Number.isFinite(publishedAt)
+        && publishedAt >= earliestMatch
+        && publishedAt <= latestMatch;
+    })
+    .sort((left, right) => {
+      const leftDistance = Math.abs(Date.parse(left.timestamp || "") - requestedAt);
+      const rightDistance = Math.abs(Date.parse(right.timestamp || "") - requestedAt);
+      return leftDistance - rightDistance;
+    })[0];
+  if (!match) return false;
+
+  await env.DB.prepare(`UPDATE reels SET publish_status = 'published', publish_error = NULL,
+    instagram_media_id = ?, instagram_permalink = ?, published_at = COALESCE(published_at, CURRENT_TIMESTAMP)
+    WHERE id = ?`)
+    .bind(match.id, match.permalink || null, record.id)
+    .run();
+  return true;
+}
+
 async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
   if (!metaConnected(env)) {
     await env.DB.prepare(
@@ -509,6 +575,14 @@ async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
   }
 
   try {
+    if (record.publish_status === "publishing") {
+      try {
+        if (await reconcilePublishedReel(record, env)) return;
+      } catch (error) {
+        console.warn("A publicação em andamento não pôde ser reconciliada antes da retomada:", error);
+      }
+    }
+
     await env.DB.prepare(`UPDATE reels SET publish_status = 'creating', publish_error = NULL,
       publish_requested_at = COALESCE(publish_requested_at, CURRENT_TIMESTAMP) WHERE id = ?`)
       .bind(record.id).run();
@@ -582,6 +656,11 @@ async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
       instagram_media_id = ?, instagram_permalink = ?, published_at = CURRENT_TIMESTAMP WHERE id = ?`)
       .bind(published.id, permalink, record.id).run();
   } catch (error) {
+    try {
+      if (await reconcilePublishedReel(record, env)) return;
+    } catch (reconciliationError) {
+      console.warn("A publicação não pôde ser reconciliada após a resposta da Meta:", reconciliationError);
+    }
     const message = error instanceof Error ? error.message : "Falha desconhecida na publicação.";
     await env.DB.prepare(
       "UPDATE reels SET publish_status = 'failed', publish_error = ? WHERE id = ?",
@@ -636,7 +715,7 @@ async function processReel(record: ReelRecord, env: Env, baseUrl: string) {
 async function reelById(id: number, env: Env) {
   return env.DB.prepare(`SELECT id, source_url, rules, source_account, rights_confirmed, public_token,
     storage_key, filename, content_type, status, publication_mode, share_to_feed, caption,
-    publish_status, instagram_container_id
+    publish_status, instagram_container_id, publish_requested_at, created_at
     FROM reels WHERE id = ?`).bind(id).first<ReelRecord>();
 }
 
@@ -675,7 +754,8 @@ async function queueReel(
 
   const record = await env.DB.prepare(`SELECT id, source_url, rules, source_account, rights_confirmed,
     public_token, storage_key, filename, content_type, status, publication_mode, share_to_feed,
-    caption, publish_status, instagram_container_id FROM reels WHERE message_id = ?`)
+    caption, publish_status, instagram_container_id, publish_requested_at, created_at
+    FROM reels WHERE message_id = ?`)
     .bind(input.messageId).first<ReelRecord>();
   if (!record) return { accepted: false, reason: "database_error" };
   ctx.waitUntil(processReel(record, env, baseUrl));
@@ -710,7 +790,7 @@ async function listReels(env: Env, baseUrl: string) {
     publication_mode, share_to_feed, caption, publish_status, publish_error,
     instagram_container_id, instagram_media_id, instagram_permalink, publish_requested_at,
     published_at, created_at, completed_at
-    FROM reels ORDER BY id DESC LIMIT 80`).all<ReelListRow>();
+    FROM reels WHERE status <> 'failed' ORDER BY id DESC LIMIT 80`).all<ReelListRow>();
   return results.map((row) => ({
     ...row,
     download_url: row.status === "ready" && row.public_token

@@ -419,7 +419,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText }: Inbox
             {reels.map((reel) => {
               const canPublish = reel.status === "ready"
                 && reel.publish_status !== "published"
-                && !["creating", "publishing"].includes(reel.publish_status);
+                && reel.publish_status !== "creating";
               return (
                 <article className="reel-row" key={reel.id}>
                   <img className="reel-cover" src={dashboard.settings.cover_url} alt="" />
@@ -454,6 +454,8 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText }: Inbox
                       >
                         {publishingId === reel.id
                           ? "Iniciando…"
+                          : reel.publish_status === "publishing"
+                            ? "Atualizar publicação"
                           : reel.publish_status === "processing"
                             ? "Continuar publicação"
                             : "Aprovar e publicar"}

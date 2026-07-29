@@ -62,6 +62,8 @@ test("declares the protected intake, dashboard and official Meta publishing flow
   assert.match(worker, /public_token/);
   assert.match(worker, /\/api\/dashboard/);
   assert.match(worker, /media_publish/);
+  assert.match(worker, /reconcilePublishedReel/);
+  assert.match(worker, /WHERE status <> 'failed'/);
   assert.match(worker, /cover_url/);
   assert.match(worker, /publish-media/);
   assert.match(worker, /PUBLISH_URL_SECRET/);
