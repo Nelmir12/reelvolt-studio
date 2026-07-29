@@ -19,6 +19,7 @@ interface Env {
   REEL_RESOLVER_TOKEN?: string;
   REEL_RESOLVER_AUTH_SCHEME?: string;
   INSTAGRAM_ACCESS_TOKEN?: string;
+  INSTAGRAM_ACCESS_TOKEN_EXPIRES_AT?: string;
   INSTAGRAM_USER_ID?: string;
   INSTAGRAM_API_VERSION?: string;
   INSTAGRAM_GRAPH_HOST?: string;
@@ -79,6 +80,12 @@ type ReelListRow = ReelRecord & {
   completed_at: string | null;
 };
 
+type InstagramCredentials = {
+  accessToken: string;
+  userId: string;
+  expiresAt: number;
+};
+
 const FIXED_CAPTION = "V arrived at #VogueWorld: Hollywood in unmistakable style, enjoying the live performances while showcasing the effortless elegance he's become known for. Another runway-worthy moment. #Taehyung";
 const COVER_PATH = "/reel-cover.jpg";
 const PUBLICATION_MODES = new Set<PublicationMode>(["download_only", "approval", "auto"]);
@@ -135,6 +142,13 @@ const CREATE_AUTHORIZED_SENDERS = `CREATE TABLE IF NOT EXISTS authorized_senders
   sender_id TEXT PRIMARY KEY,
   paired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`;
+const CREATE_INSTAGRAM_AUTH = `CREATE TABLE IF NOT EXISTS instagram_auth (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  token_cipher TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`;
 
 function json(data: unknown, init: ResponseInit = {}) {
   const headers = new Headers(init.headers);
@@ -151,6 +165,7 @@ async function ensureDatabase(env: Env) {
     env.DB.prepare(CREATE_REELS_SOURCE_INDEX),
     env.DB.prepare(CREATE_REELS_PUBLIC_TOKEN_INDEX),
     env.DB.prepare(CREATE_AUTHORIZED_SENDERS),
+    env.DB.prepare(CREATE_INSTAGRAM_AUTH),
   ]);
 
   const { results } = await env.DB.prepare("PRAGMA table_info(reels)").all<{ name: string }>();
@@ -248,6 +263,105 @@ function base64Url(bytes: ArrayBuffer) {
   let binary = "";
   for (const value of values) binary += String.fromCharCode(value);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function fromBase64Url(value: string) {
+  const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+async function tokenEncryptionKey(secret: string) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
+  return crypto.subtle.importKey("raw", digest, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+
+async function encryptInstagramToken(token: string, secret: string) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = new Uint8Array(await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    await tokenEncryptionKey(secret),
+    new TextEncoder().encode(token),
+  ));
+  const packed = new Uint8Array(iv.length + encrypted.length);
+  packed.set(iv);
+  packed.set(encrypted, iv.length);
+  return base64Url(packed.buffer);
+}
+
+async function decryptInstagramToken(ciphertext: string, secret: string) {
+  const packed = fromBase64Url(ciphertext);
+  if (packed.length <= 12) throw new Error("Credencial criptografada inválida.");
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: packed.slice(0, 12) },
+    await tokenEncryptionKey(secret),
+    packed.slice(12),
+  );
+  return new TextDecoder().decode(decrypted);
+}
+
+async function saveInstagramCredentials(credentials: InstagramCredentials, env: Env) {
+  if (!env.PUBLISH_URL_SECRET) return;
+  const tokenCipher = await encryptInstagramToken(credentials.accessToken, env.PUBLISH_URL_SECRET);
+  await env.DB.prepare(`INSERT INTO instagram_auth (id, token_cipher, user_id, expires_at, updated_at)
+    VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(id) DO UPDATE SET token_cipher = excluded.token_cipher,
+      user_id = excluded.user_id, expires_at = excluded.expires_at,
+      updated_at = CURRENT_TIMESTAMP`)
+    .bind(tokenCipher, credentials.userId, credentials.expiresAt)
+    .run();
+}
+
+async function instagramCredentials(env: Env): Promise<InstagramCredentials> {
+  let accessToken = env.INSTAGRAM_ACCESS_TOKEN || "";
+  let userId = env.INSTAGRAM_USER_ID || "";
+  let expiresAt = Number(env.INSTAGRAM_ACCESS_TOKEN_EXPIRES_AT || 0);
+  let stored = false;
+
+  if (env.PUBLISH_URL_SECRET) {
+    const row = await env.DB.prepare(
+      "SELECT token_cipher, user_id, expires_at FROM instagram_auth WHERE id = 1",
+    ).first<{ token_cipher: string; user_id: string; expires_at: number }>();
+    if (row) {
+      try {
+        accessToken = await decryptInstagramToken(row.token_cipher, env.PUBLISH_URL_SECRET);
+        userId = row.user_id;
+        expiresAt = Number(row.expires_at || 0);
+        stored = true;
+      } catch (error) {
+        console.warn("A credencial armazenada do Instagram não pôde ser aberta; usando a configuração segura.", error);
+      }
+    }
+  }
+
+  if (!accessToken || !userId) {
+    throw new Error("A conta do Instagram ainda não foi conectada.");
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const refreshWindow = 15 * 24 * 60 * 60;
+  if (expiresAt > now && expiresAt - now <= refreshWindow) {
+    const refreshUrl = new URL("https://graph.instagram.com/refresh_access_token");
+    refreshUrl.searchParams.set("grant_type", "ig_refresh_token");
+    refreshUrl.searchParams.set("access_token", accessToken);
+    const response = await fetch(refreshUrl);
+    const result = await response.json() as {
+      access_token?: string;
+      expires_in?: number;
+      error?: { message?: string };
+    };
+    if (!response.ok || !result.access_token) {
+      throw new Error(result.error?.message || "Não foi possível renovar a conexão com o Instagram.");
+    }
+    accessToken = result.access_token;
+    expiresAt = now + Number(result.expires_in || 60 * 24 * 60 * 60);
+    await saveInstagramCredentials({ accessToken, userId, expiresAt }, env);
+  } else if (!stored && expiresAt > now) {
+    await saveInstagramCredentials({ accessToken, userId, expiresAt }, env);
+  }
+
+  return { accessToken, userId, expiresAt };
 }
 
 async function mediaSignature(reelId: number, expires: number, secret: string) {
@@ -358,8 +472,8 @@ async function graphRequest(
   method: "GET" | "POST",
   parameters: Record<string, string>,
 ) {
-  if (!env.INSTAGRAM_ACCESS_TOKEN) throw new Error("A conta do Instagram ainda não foi conectada.");
-  const values = new URLSearchParams({ ...parameters, access_token: env.INSTAGRAM_ACCESS_TOKEN });
+  const credentials = await instagramCredentials(env);
+  const values = new URLSearchParams({ ...parameters, access_token: credentials.accessToken });
   const endpoint = `${metaBaseUrl(env)}/${path.replace(/^\/+/, "")}`;
   const response = method === "POST"
     ? await fetch(endpoint, {

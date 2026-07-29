@@ -36,3 +36,11 @@ export const authorizedSenders = sqliteTable("authorized_senders", {
   senderId: text("sender_id").primaryKey(),
   pairedAt: text("paired_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+export const instagramAuth = sqliteTable("instagram_auth", {
+  id: integer("id").primaryKey(),
+  tokenCipher: text("token_cipher").notNull(),
+  userId: text("user_id").notNull(),
+  expiresAt: integer("expires_at").notNull(),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
