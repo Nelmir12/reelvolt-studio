@@ -1,0 +1,15 @@
+<svg width="1600" height="900" viewBox="0 0 1600 900" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .mono { font-family: Arial, Helvetica, sans-serif; font-weight: 800; letter-spacing: 6px; }
+    .display { font-family: Arial Black, Arial, Helvetica, sans-serif; font-weight: 950; letter-spacing: -8px; }
+  </style>
+  <rect x="88" y="80" width="62" height="62" rx="12" fill="#D8FF45" transform="rotate(-3 119 111)"/>
+  <text x="101" y="121" class="mono" font-size="25" letter-spacing="-2" fill="#080808">BT</text>
+  <text x="172" y="105" class="mono" font-size="20" fill="#F4F4E9">REELVOLT</text>
+  <text x="172" y="133" class="mono" font-size="13" fill="#929589">BT SUPPLY STUDIO</text>
+  <text x="88" y="338" class="display" font-size="128" fill="#F4F4E9">BAIXE.</text>
+  <text x="88" y="477" class="display" font-size="128" fill="#F4F4E9">APROVE.</text>
+  <text x="88" y="616" class="display" font-size="128" fill="#D8FF45">PUBLIQUE.</text>
+  <rect x="88" y="644" width="565" height="10" fill="#FF42C5" transform="rotate(-1 88 644)"/>
+  <text x="92" y="728" class="mono" font-size="17" fill="#B7BAAD">REELS AUTORIZADOS. UM ÚNICO FLUXO.</text>
+</svg>

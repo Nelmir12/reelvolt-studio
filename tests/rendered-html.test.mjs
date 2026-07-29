@@ -34,16 +34,17 @@ test("server-renders the authenticated Reel Inbox", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>BT Supply Reel Inbox<\/title>/i);
-  assert.match(html, /Compartilhe/);
   assert.match(html, /Baixe/);
-  assert.match(html, /Organize/);
+  assert.match(html, /Aprove/);
+  assert.match(html, /Publique/);
   assert.match(html, /Novo Reel/);
-  assert.match(html, /Fila recente/);
-  assert.match(html, /Notion/);
+  assert.match(html, /Produção recente/);
+  assert.match(html, /Pacote padrão/);
+  assert.doesNotMatch(html, /Notion/);
   assert.doesNotMatch(html, /Telegram|Direct do Instagram|codex-preview|Building your site/i);
 });
 
-test("declares the protected web intake, PWA share target and Notion flow", async () => {
+test("declares the protected intake, dashboard and official Meta publishing flow", async () => {
   const [worker, readme, manifest] = await Promise.all([
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
@@ -54,14 +55,20 @@ test("declares the protected web intake, PWA share target and Notion flow", asyn
   assert.match(worker, /oai-authenticated-user-email/i);
   assert.match(worker, /INBOX_ALLOWED_EMAILS/);
   assert.match(worker, /rightsConfirmed/);
-  assert.match(worker, /NOTION_DATABASE_ID/);
+  assert.doesNotMatch(worker, /NOTION_DATABASE_ID|api\.notion\.com/);
   assert.match(worker, /REEL_RESOLVER_AUTH_SCHEME/);
   assert.match(worker, /result\.picker/);
   assert.match(worker, /downloadMode: "auto"/);
   assert.match(worker, /public_token/);
+  assert.match(worker, /\/api\/dashboard/);
+  assert.match(worker, /media_publish/);
+  assert.match(worker, /cover_url/);
+  assert.match(worker, /publish-media/);
+  assert.match(worker, /PUBLISH_URL_SECRET/);
   assert.doesNotMatch(worker, /TELEGRAM_BOT_TOKEN|telegram\/webhook/i);
   assert.match(manifest, /"share_target"/);
   assert.match(manifest, /"display": "standalone"/);
   assert.match(readme, /fallback privado quando o Instagram exige login/);
   assert.match(readme, /instância privada[\s\S]*Cobalt/);
+  assert.match(readme, /O Notion não faz\s+parte do fluxo operacional/);
 });

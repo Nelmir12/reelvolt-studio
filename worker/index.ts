@@ -15,17 +15,22 @@ interface Env {
   ADMIN_TOKEN?: string;
   INBOX_ALLOWED_EMAILS?: string;
   PUBLIC_BASE_URL?: string;
-  NOTION_TOKEN?: string;
-  NOTION_DATABASE_ID?: string;
   REEL_RESOLVER_URL?: string;
   REEL_RESOLVER_TOKEN?: string;
   REEL_RESOLVER_AUTH_SCHEME?: string;
+  INSTAGRAM_ACCESS_TOKEN?: string;
+  INSTAGRAM_USER_ID?: string;
+  INSTAGRAM_API_VERSION?: string;
+  INSTAGRAM_GRAPH_HOST?: string;
+  PUBLISH_URL_SECRET?: string;
 }
 
 interface ExecutionContext {
   waitUntil(promise: Promise<unknown>): void;
   passThroughOnException(): void;
 }
+
+type PublicationMode = "download_only" | "approval" | "auto";
 
 type ReelInput = {
   messageId: string;
@@ -34,6 +39,8 @@ type ReelInput = {
   rules?: string;
   sourceAccount?: string;
   rightsConfirmed: boolean;
+  publicationMode: PublicationMode;
+  shareToFeed: boolean;
 };
 
 type QueueResult = {
@@ -49,24 +56,32 @@ type ReelRecord = {
   source_account: string | null;
   rights_confirmed: number;
   public_token: string | null;
-  notion_page_id: string | null;
-};
-
-type ReelListRow = {
-  id: number;
-  source_url: string;
-  rules: string | null;
-  source_account: string | null;
-  rights_confirmed: number;
-  public_token: string | null;
+  storage_key: string | null;
   filename: string | null;
   content_type: string | null;
-  size_bytes: number | null;
   status: string;
+  publication_mode: PublicationMode;
+  share_to_feed: number;
+  caption: string | null;
+  publish_status: string;
+  instagram_container_id: string | null;
+};
+
+type ReelListRow = ReelRecord & {
+  size_bytes: number | null;
   error: string | null;
+  publish_error: string | null;
+  instagram_media_id: string | null;
+  instagram_permalink: string | null;
+  publish_requested_at: string | null;
+  published_at: string | null;
   created_at: string;
   completed_at: string | null;
 };
+
+const FIXED_CAPTION = "V arrived at #VogueWorld: Hollywood in unmistakable style, enjoying the live performances while showcasing the effortless elegance he's become known for. Another runway-worthy moment. #Taehyung";
+const COVER_PATH = "/reel-cover.jpg";
+const PUBLICATION_MODES = new Set<PublicationMode>(["download_only", "approval", "auto"]);
 
 const CREATE_REELS = `CREATE TABLE IF NOT EXISTS reels (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,12 +100,37 @@ const CREATE_REELS = `CREATE TABLE IF NOT EXISTS reels (
   size_bytes INTEGER,
   status TEXT NOT NULL DEFAULT 'queued',
   error TEXT,
+  publication_mode TEXT NOT NULL DEFAULT 'approval',
+  share_to_feed INTEGER NOT NULL DEFAULT 1,
+  caption TEXT,
+  publish_status TEXT NOT NULL DEFAULT 'not_requested',
+  publish_error TEXT,
+  instagram_container_id TEXT,
+  instagram_media_id TEXT,
+  instagram_permalink TEXT,
+  publish_requested_at TEXT,
+  published_at TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   completed_at TEXT
 )`;
+
+const ADDITIONAL_COLUMNS: Record<string, string> = {
+  publication_mode: "ALTER TABLE reels ADD COLUMN publication_mode TEXT NOT NULL DEFAULT 'approval'",
+  share_to_feed: "ALTER TABLE reels ADD COLUMN share_to_feed INTEGER NOT NULL DEFAULT 1",
+  caption: "ALTER TABLE reels ADD COLUMN caption TEXT",
+  publish_status: "ALTER TABLE reels ADD COLUMN publish_status TEXT NOT NULL DEFAULT 'not_requested'",
+  publish_error: "ALTER TABLE reels ADD COLUMN publish_error TEXT",
+  instagram_container_id: "ALTER TABLE reels ADD COLUMN instagram_container_id TEXT",
+  instagram_media_id: "ALTER TABLE reels ADD COLUMN instagram_media_id TEXT",
+  instagram_permalink: "ALTER TABLE reels ADD COLUMN instagram_permalink TEXT",
+  publish_requested_at: "ALTER TABLE reels ADD COLUMN publish_requested_at TEXT",
+  published_at: "ALTER TABLE reels ADD COLUMN published_at TEXT",
+};
+
 const CREATE_REELS_INDEX = "CREATE INDEX IF NOT EXISTS reels_created_at_idx ON reels (created_at DESC)";
 const CREATE_REELS_SOURCE_INDEX = "CREATE INDEX IF NOT EXISTS reels_source_url_idx ON reels (source_url)";
 const CREATE_REELS_PUBLIC_TOKEN_INDEX = "CREATE UNIQUE INDEX IF NOT EXISTS reels_public_token_idx ON reels (public_token)";
+const CREATE_REELS_PUBLISH_INDEX = "CREATE INDEX IF NOT EXISTS reels_publish_status_idx ON reels (publish_status)";
 const CREATE_AUTHORIZED_SENDERS = `CREATE TABLE IF NOT EXISTS authorized_senders (
   sender_id TEXT PRIMARY KEY,
   paired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -112,6 +152,13 @@ async function ensureDatabase(env: Env) {
     env.DB.prepare(CREATE_REELS_PUBLIC_TOKEN_INDEX),
     env.DB.prepare(CREATE_AUTHORIZED_SENDERS),
   ]);
+
+  const { results } = await env.DB.prepare("PRAGMA table_info(reels)").all<{ name: string }>();
+  const existing = new Set(results.map((column) => column.name));
+  for (const [name, statement] of Object.entries(ADDITIONAL_COLUMNS)) {
+    if (!existing.has(name)) await env.DB.prepare(statement).run();
+  }
+  await env.DB.prepare(CREATE_REELS_PUBLISH_INDEX).run();
 }
 
 function configuredInboxEmails(env: Env) {
@@ -172,99 +219,88 @@ function sanitizeText(value: unknown, maxLength: number) {
   return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
 }
 
-function notionText(content: string) {
-  return [{ type: "text", text: { content: content.slice(0, 1900) } }];
+function sanitizePublicationMode(value: unknown): PublicationMode {
+  return typeof value === "string" && PUBLICATION_MODES.has(value as PublicationMode)
+    ? value as PublicationMode
+    : "approval";
 }
 
-function notionHeaders(env: Env) {
-  return {
-    authorization: `Bearer ${env.NOTION_TOKEN}`,
-    "content-type": "application/json",
-    "notion-version": "2022-06-28",
-  };
+function metaConnected(env: Env) {
+  return Boolean(
+    env.INSTAGRAM_ACCESS_TOKEN
+    && env.INSTAGRAM_USER_ID
+    && env.INSTAGRAM_API_VERSION
+    && env.PUBLISH_URL_SECRET,
+  );
 }
 
-function notionStatus(status: string) {
-  const labels: Record<string, string> = {
-    queued: "Na fila",
-    downloading: "Baixando",
-    ready: "Pronto",
-    failed: "Falhou",
-  };
-  return labels[status] ?? status;
+function metaBaseUrl(env: Env) {
+  const host = (env.INSTAGRAM_GRAPH_HOST || "graph.instagram.com").replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  return `https://${host}/${env.INSTAGRAM_API_VERSION}`;
 }
 
-async function createNotionRecord(record: ReelRecord, env: Env, baseUrl: string) {
-  if (!env.NOTION_TOKEN || !env.NOTION_DATABASE_ID) return null;
-  const response = await fetch("https://api.notion.com/v1/pages", {
-    method: "POST",
-    headers: notionHeaders(env),
-    body: JSON.stringify({
-      parent: { database_id: env.NOTION_DATABASE_ID },
-      properties: {
-        Nome: { title: notionText(`Reel #${record.id}`) },
-        URL: { url: record.source_url },
-        Status: { select: { name: "Na fila" } },
-        Regras: { rich_text: notionText(record.rules || "Sem regras adicionais") },
-        Origem: { select: { name: "Web" } },
-        ID: { number: record.id },
-        MP4: { url: publicDownloadUrl(baseUrl, record.public_token || "") },
-        Erro: { rich_text: [] },
-        "Conta de origem": { rich_text: record.source_account ? notionText(record.source_account) : [] },
-        "Direitos confirmados": { checkbox: Boolean(record.rights_confirmed) },
-      },
-    }),
-  });
-  const result = await response.json() as { id?: string; message?: string };
-  if (!response.ok || !result.id) throw new Error(result.message || "Falha ao criar o item no Notion.");
-  await env.DB.prepare("UPDATE reels SET notion_page_id = ? WHERE id = ?").bind(result.id, record.id).run();
-  return result.id;
+function sleep(milliseconds: number) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function updateNotionRecord(
-  pageId: string | null,
-  status: string,
-  error: string | null,
-  env: Env,
-) {
-  if (!pageId || !env.NOTION_TOKEN) return;
-  const response = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
-    method: "PATCH",
-    headers: notionHeaders(env),
-    body: JSON.stringify({
-      properties: {
-        Status: { select: { name: notionStatus(status) } },
-        Erro: { rich_text: error ? notionText(error) : [] },
-      },
-    }),
-  });
-  if (!response.ok) {
-    const result = await response.json() as { message?: string };
-    throw new Error(result.message || "Falha ao atualizar o item no Notion.");
-  }
+function base64Url(bytes: ArrayBuffer) {
+  const values = new Uint8Array(bytes);
+  let binary = "";
+  for (const value of values) binary += String.fromCharCode(value);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+async function mediaSignature(reelId: number, expires: number, secret: string) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(`${reelId}.${expires}`),
+  );
+  return base64Url(signature);
+}
+
+async function signedMediaUrl(reelId: number, baseUrl: string, env: Env) {
+  if (!env.PUBLISH_URL_SECRET) throw new Error("A assinatura temporária de mídia não está configurada.");
+  const expires = Math.floor(Date.now() / 1000) + 60 * 60 * 2;
+  const signature = await mediaSignature(reelId, expires, env.PUBLISH_URL_SECRET);
+  return `${baseUrl}/publish-media/${reelId}.mp4?expires=${expires}&signature=${encodeURIComponent(signature)}`;
+}
+
+async function validMediaSignature(reelId: number, url: URL, env: Env) {
+  if (!env.PUBLISH_URL_SECRET) return false;
+  const expires = Number(url.searchParams.get("expires"));
+  const provided = url.searchParams.get("signature") || "";
+  const now = Math.floor(Date.now() / 1000);
+  if (!Number.isInteger(expires) || expires < now || expires > now + 60 * 60 * 3 || !provided) return false;
+  const expected = await mediaSignature(reelId, expires, env.PUBLISH_URL_SECRET);
+  return expected === provided;
 }
 
 async function resolveVideo(sourceUrl: string, env: Env) {
   let resolverFailure: string | null = null;
   const direct = await fetch(sourceUrl, {
     headers: {
-      "user-agent": "Mozilla/5.0 (compatible; BTSupplyReelInbox/3.0)",
+      "user-agent": "Mozilla/5.0 (compatible; BTSupplyReelInbox/5.0)",
       accept: "text/html,application/xhtml+xml,video/*;q=0.9,*/*;q=0.8",
     },
     redirect: "follow",
   });
   const directType = direct.headers.get("content-type") ?? "";
-  if (direct.ok && directType.startsWith("video/") && direct.body) {
-    return { response: direct };
-  }
+  if (direct.ok && directType.startsWith("video/") && direct.body) return { response: direct };
 
   if (direct.ok && directType.includes("text/html")) {
     const html = await direct.text();
     const encoded = html.match(/<meta[^>]+property=["']og:video(?::secure_url)?["'][^>]+content=["']([^"']+)["']/i)?.[1]
       ?? html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:video(?::secure_url)?["']/i)?.[1];
     if (encoded) {
-      const videoUrl = encoded.replaceAll("&amp;", "&");
-      const response = await fetch(videoUrl, {
+      const response = await fetch(encoded.replaceAll("&amp;", "&"), {
         headers: { referer: "https://www.instagram.com/" },
         redirect: "follow",
       });
@@ -300,11 +336,7 @@ async function resolveVideo(sourceUrl: string, env: Env) {
         error?: { code?: string };
       };
       const pickedVideo = result.picker?.find((item) => item.type === "video" && item.url)?.url;
-      const videoUrl = result.videoUrl
-        ?? result.url
-        ?? result.download_url
-        ?? pickedVideo
-        ?? result.tunnel?.[0];
+      const videoUrl = result.videoUrl ?? result.url ?? result.download_url ?? pickedVideo ?? result.tunnel?.[0];
       if (typeof videoUrl === "string") {
         const response = await fetch(videoUrl, { redirect: "follow" });
         if (response.ok && response.body) return { response };
@@ -316,31 +348,137 @@ async function resolveVideo(sourceUrl: string, env: Env) {
       resolverFailure = `HTTP ${resolver.status}`;
     }
   }
-  if (resolverFailure) {
-    throw new Error(`O resolvedor não conseguiu obter este Reel (${resolverFailure}).`);
+  if (resolverFailure) throw new Error(`O resolvedor não conseguiu obter este Reel (${resolverFailure}).`);
+  throw new Error("O Instagram exige login ou o Reel não está publicamente acessível.");
+}
+
+async function graphRequest(
+  path: string,
+  env: Env,
+  method: "GET" | "POST",
+  parameters: Record<string, string>,
+) {
+  if (!env.INSTAGRAM_ACCESS_TOKEN) throw new Error("A conta do Instagram ainda não foi conectada.");
+  const values = new URLSearchParams({ ...parameters, access_token: env.INSTAGRAM_ACCESS_TOKEN });
+  const endpoint = `${metaBaseUrl(env)}/${path.replace(/^\/+/, "")}`;
+  const response = method === "POST"
+    ? await fetch(endpoint, {
+      method,
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: values,
+    })
+    : await fetch(`${endpoint}?${values.toString()}`);
+  const result = await response.json() as {
+    id?: string;
+    status?: string;
+    status_code?: string;
+    permalink?: string;
+    timestamp?: string;
+    error?: { message?: string; code?: number; error_subcode?: number };
+  };
+  if (!response.ok || result.error) {
+    const details = result.error?.code ? ` (Meta ${result.error.code})` : "";
+    throw new Error(`${result.error?.message || "A Meta recusou a solicitação."}${details}`);
   }
-  throw new Error(
-    "O Instagram exige login ou o Reel não está publicamente acessível. Configure o resolvedor privado para este tipo de link.",
-  );
+  return result;
+}
+
+async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
+  if (!metaConnected(env)) {
+    await env.DB.prepare(
+      "UPDATE reels SET publish_status = 'awaiting_setup', publish_error = ? WHERE id = ?",
+    ).bind("Conecte a conta @btsupply_ à Meta para publicar.", record.id).run();
+    return;
+  }
+  if (!record.storage_key || record.status !== "ready") {
+    throw new Error("O MP4 ainda não está pronto para publicação.");
+  }
+
+  try {
+    await env.DB.prepare(`UPDATE reels SET publish_status = 'creating', publish_error = NULL,
+      publish_requested_at = COALESCE(publish_requested_at, CURRENT_TIMESTAMP) WHERE id = ?`)
+      .bind(record.id).run();
+
+    let containerId = record.instagram_container_id;
+    if (!containerId) {
+      const videoUrl = await signedMediaUrl(record.id, baseUrl, env);
+      const created = await graphRequest(
+        `${env.INSTAGRAM_USER_ID}/media`,
+        env,
+        "POST",
+        {
+          media_type: "REELS",
+          video_url: videoUrl,
+          cover_url: `${baseUrl}${COVER_PATH}`,
+          caption: record.caption || FIXED_CAPTION,
+          share_to_feed: record.share_to_feed ? "true" : "false",
+        },
+      );
+      if (!created.id) throw new Error("A Meta não retornou o identificador da publicação.");
+      containerId = created.id;
+      await env.DB.prepare(
+        "UPDATE reels SET instagram_container_id = ?, publish_status = 'processing' WHERE id = ?",
+      ).bind(containerId, record.id).run();
+    }
+
+    let finished = false;
+    for (let attempt = 0; attempt < 9; attempt += 1) {
+      if (attempt > 0) await sleep(2800);
+      const status = await graphRequest(
+        String(containerId),
+        env,
+        "GET",
+        { fields: "status_code,status" },
+      );
+      if (status.status_code === "FINISHED") {
+        finished = true;
+        break;
+      }
+      if (status.status_code === "ERROR" || status.status_code === "EXPIRED") {
+        throw new Error(status.status || `O contêiner da Meta terminou como ${status.status_code}.`);
+      }
+    }
+    if (!finished) {
+      await env.DB.prepare(
+        "UPDATE reels SET publish_status = 'processing', publish_error = ? WHERE id = ?",
+      ).bind("A Meta ainda está processando o vídeo. Use “Continuar publicação” para consultar novamente.", record.id).run();
+      return;
+    }
+
+    await env.DB.prepare(
+      "UPDATE reels SET publish_status = 'publishing', publish_error = NULL WHERE id = ?",
+    ).bind(record.id).run();
+    const published = await graphRequest(
+      `${env.INSTAGRAM_USER_ID}/media_publish`,
+      env,
+      "POST",
+      { creation_id: String(containerId) },
+    );
+    if (!published.id) throw new Error("A Meta não retornou o ID do Reel publicado.");
+
+    let permalink: string | null = null;
+    try {
+      const media = await graphRequest(published.id, env, "GET", { fields: "permalink,timestamp" });
+      permalink = media.permalink || null;
+    } catch (error) {
+      console.warn("Reel publicado, mas o permalink não pôde ser consultado:", error);
+    }
+
+    await env.DB.prepare(`UPDATE reels SET publish_status = 'published', publish_error = NULL,
+      instagram_media_id = ?, instagram_permalink = ?, published_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .bind(published.id, permalink, record.id).run();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Falha desconhecida na publicação.";
+    await env.DB.prepare(
+      "UPDATE reels SET publish_status = 'failed', publish_error = ? WHERE id = ?",
+    ).bind(message.slice(0, 700), record.id).run();
+  }
 }
 
 async function processReel(record: ReelRecord, env: Env, baseUrl: string) {
-  let notionPageId = record.notion_page_id;
   try {
-    try {
-      notionPageId = await createNotionRecord(record, env, baseUrl) ?? notionPageId;
-    } catch (error) {
-      console.error("Falha ao registrar no Notion:", error);
-    }
-
     await env.DB.prepare("UPDATE reels SET status = 'downloading', error = NULL WHERE id = ?")
       .bind(record.id).run();
-    try {
-      await updateNotionRecord(notionPageId, "downloading", null, env);
-    } catch (error) {
-      console.error("Falha ao atualizar o Notion:", error);
-    }
-
     const { response } = await resolveVideo(record.source_url, env);
     const contentType = response.headers.get("content-type")?.split(";")[0] || "video/mp4";
     if (!contentType.startsWith("video/") && contentType !== "application/octet-stream") {
@@ -357,27 +495,35 @@ async function processReel(record: ReelRecord, env: Env, baseUrl: string) {
       },
     });
     const stored = await env.VIDEOS.head(storageKey);
+    const publishStatus = record.publication_mode === "download_only"
+      ? "not_requested"
+      : record.publication_mode === "auto"
+        ? "queued"
+        : "awaiting_approval";
     await env.DB.prepare(`UPDATE reels
       SET status = 'ready', storage_key = ?, filename = ?, content_type = ?, size_bytes = ?,
-        completed_at = CURRENT_TIMESTAMP, error = NULL
+        completed_at = CURRENT_TIMESTAMP, error = NULL, publish_status = ?, publish_error = NULL
       WHERE id = ?`)
-      .bind(storageKey, `reel-${record.id}.mp4`, "video/mp4", stored?.size ?? null, record.id)
+      .bind(storageKey, `reel-${record.id}.mp4`, "video/mp4", stored?.size ?? null, publishStatus, record.id)
       .run();
-    try {
-      await updateNotionRecord(notionPageId, "ready", null, env);
-    } catch (error) {
-      console.error("Falha ao atualizar o Notion:", error);
+
+    if (record.publication_mode === "auto") {
+      await publishReel({ ...record, storage_key: storageKey, filename: `reel-${record.id}.mp4`, content_type: "video/mp4", status: "ready" }, env, baseUrl);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Falha desconhecida";
-    await env.DB.prepare("UPDATE reels SET status = 'failed', error = ? WHERE id = ?")
+    await env.DB.prepare(`UPDATE reels SET status = 'failed', error = ?,
+      publish_status = CASE WHEN publication_mode = 'download_only' THEN 'not_requested' ELSE 'blocked' END
+      WHERE id = ?`)
       .bind(message.slice(0, 500), record.id).run();
-    try {
-      await updateNotionRecord(notionPageId, "failed", message, env);
-    } catch (notionError) {
-      console.error("Falha ao atualizar o Notion:", notionError);
-    }
   }
+}
+
+async function reelById(id: number, env: Env) {
+  return env.DB.prepare(`SELECT id, source_url, rules, source_account, rights_confirmed, public_token,
+    storage_key, filename, content_type, status, publication_mode, share_to_feed, caption,
+    publish_status, instagram_container_id
+    FROM reels WHERE id = ?`).bind(id).first<ReelRecord>();
 }
 
 async function queueReel(
@@ -392,10 +538,12 @@ async function queueReel(
   if (existing) return { accepted: false, reason: "duplicate", id: existing.id };
 
   const publicToken = crypto.randomUUID();
+  const initialPublishStatus = input.publicationMode === "download_only" ? "not_requested" : "awaiting_download";
   const result = await env.DB.prepare(
     `INSERT OR IGNORE INTO reels
-      (message_id, sender_id, source_url, rules, source_account, rights_confirmed, public_token, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'queued')`,
+      (message_id, sender_id, source_url, rules, source_account, rights_confirmed, public_token,
+       status, publication_mode, share_to_feed, caption, publish_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`,
   ).bind(
     input.messageId,
     input.senderId,
@@ -404,13 +552,17 @@ async function queueReel(
     input.sourceAccount || null,
     input.rightsConfirmed ? 1 : 0,
     publicToken,
+    input.publicationMode,
+    input.shareToFeed ? 1 : 0,
+    FIXED_CAPTION,
+    initialPublishStatus,
   ).run();
   if (!result.meta.changes) return { accepted: false, reason: "duplicate" };
 
-  const record = await env.DB.prepare(
-    `SELECT id, source_url, rules, source_account, rights_confirmed, public_token, notion_page_id
-      FROM reels WHERE message_id = ?`,
-  ).bind(input.messageId).first<ReelRecord>();
+  const record = await env.DB.prepare(`SELECT id, source_url, rules, source_account, rights_confirmed,
+    public_token, storage_key, filename, content_type, status, publication_mode, share_to_feed,
+    caption, publish_status, instagram_container_id FROM reels WHERE message_id = ?`)
+    .bind(input.messageId).first<ReelRecord>();
   if (!record) return { accepted: false, reason: "database_error" };
   ctx.waitUntil(processReel(record, env, baseUrl));
   return { accepted: true, id: record.id };
@@ -419,42 +571,94 @@ async function queueReel(
 async function serveVideo(
   row: { storage_key: string; filename: string; content_type: string } | null,
   env: Env,
+  options: { attachment?: boolean; method?: string } = {},
 ) {
   if (!row?.storage_key) return json({ error: "Vídeo não encontrado." }, { status: 404 });
   const object = await env.VIDEOS.get(row.storage_key);
   if (!object?.body) return json({ error: "Arquivo não encontrado." }, { status: 404 });
-  return new Response(object.body, {
-    headers: {
-      "content-type": row.content_type || "video/mp4",
-      "content-disposition": `attachment; filename="${row.filename || "reel.mp4"}"`,
-      "content-length": String(object.size),
-      "cache-control": "private, no-store",
-      "x-content-type-options": "nosniff",
-    },
+  const headers = new Headers({
+    "content-type": row.content_type || "video/mp4",
+    "content-length": String(object.size),
+    "cache-control": options.attachment === false ? "public, max-age=300" : "private, no-store",
+    "x-content-type-options": "nosniff",
+    "accept-ranges": "bytes",
   });
+  headers.set(
+    "content-disposition",
+    `${options.attachment === false ? "inline" : "attachment"}; filename="${row.filename || "reel.mp4"}"`,
+  );
+  return new Response(options.method === "HEAD" ? null : object.body, { headers });
 }
 
 async function listReels(env: Env, baseUrl: string) {
   const { results } = await env.DB.prepare(`SELECT id, source_url, rules, source_account,
-    rights_confirmed, public_token, filename, content_type, size_bytes, status, error,
-    created_at, completed_at
-    FROM reels ORDER BY id DESC LIMIT 50`).all<ReelListRow>();
+    rights_confirmed, public_token, storage_key, filename, content_type, size_bytes, status, error,
+    publication_mode, share_to_feed, caption, publish_status, publish_error,
+    instagram_container_id, instagram_media_id, instagram_permalink, publish_requested_at,
+    published_at, created_at, completed_at
+    FROM reels ORDER BY id DESC LIMIT 80`).all<ReelListRow>();
   return results.map((row) => ({
     ...row,
     download_url: row.status === "ready" && row.public_token
       ? publicDownloadUrl(baseUrl, row.public_token)
       : null,
     public_token: undefined,
+    storage_key: undefined,
   }));
+}
+
+async function dashboard(env: Env, baseUrl: string) {
+  const row = await env.DB.prepare(`SELECT
+    COUNT(*) AS total,
+    SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END) AS ready,
+    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS download_failed,
+    SUM(CASE WHEN publish_status = 'awaiting_approval' THEN 1 ELSE 0 END) AS awaiting_approval,
+    SUM(CASE WHEN publish_status IN ('creating', 'processing', 'publishing', 'queued') THEN 1 ELSE 0 END) AS publishing,
+    SUM(CASE WHEN publish_status = 'published' THEN 1 ELSE 0 END) AS published,
+    SUM(CASE WHEN publish_status = 'failed' THEN 1 ELSE 0 END) AS publish_failed,
+    COALESCE(SUM(size_bytes), 0) AS stored_bytes,
+    SUM(CASE WHEN date(created_at) >= date('now', '-6 days') THEN 1 ELSE 0 END) AS last_seven_days
+    FROM reels`).first<Record<string, number | null>>();
+  return {
+    metrics: {
+      total: Number(row?.total || 0),
+      ready: Number(row?.ready || 0),
+      awaiting_approval: Number(row?.awaiting_approval || 0),
+      publishing: Number(row?.publishing || 0),
+      published: Number(row?.published || 0),
+      failed: Number(row?.download_failed || 0) + Number(row?.publish_failed || 0),
+      stored_bytes: Number(row?.stored_bytes || 0),
+      last_seven_days: Number(row?.last_seven_days || 0),
+    },
+    settings: {
+      meta_connected: metaConnected(env),
+      resolver_connected: Boolean(env.REEL_RESOLVER_URL),
+      cover_url: `${baseUrl}${COVER_PATH}`,
+      caption: FIXED_CAPTION,
+      account: "@btsupply_",
+    },
+  };
 }
 
 async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<Response | null> {
   const url = new URL(request.url);
   const isPublicDownload = /^\/download\/[0-9a-f-]{36}$/i.test(url.pathname);
-  if (!url.pathname.startsWith("/api/") && !isPublicDownload) return null;
+  const publishMediaMatch = url.pathname.match(/^\/publish-media\/(\d+)\.mp4$/);
+  if (!url.pathname.startsWith("/api/") && !isPublicDownload && !publishMediaMatch) return null;
 
   await ensureDatabase(env);
   const baseUrl = publicBaseUrl(request.url, env);
+
+  if (publishMediaMatch && (request.method === "GET" || request.method === "HEAD")) {
+    const reelId = Number(publishMediaMatch[1]);
+    if (!await validMediaSignature(reelId, url, env)) {
+      return json({ error: "Link de publicação inválido ou expirado." }, { status: 403 });
+    }
+    const row = await env.DB.prepare(
+      "SELECT storage_key, filename, content_type FROM reels WHERE id = ? AND status = 'ready'",
+    ).bind(reelId).first<{ storage_key: string; filename: string; content_type: string }>();
+    return serveVideo(row, env, { attachment: false, method: request.method });
+  }
 
   if (url.pathname === "/api/reels" && request.method === "GET") {
     if (!validInboxUser(request, env) && !validAdmin(request, env)) {
@@ -463,42 +667,63 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     return json({ reels: await listReels(env, baseUrl) });
   }
 
+  if (url.pathname === "/api/dashboard" && request.method === "GET") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    return json(await dashboard(env, baseUrl));
+  }
+
   if (url.pathname === "/api/reels/intake" && request.method === "POST") {
     if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
     if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
-
     const data = await request.json() as {
       url?: string;
       rules?: string;
       sourceAccount?: string;
       rightsConfirmed?: boolean;
+      publicationMode?: string;
+      shareToFeed?: boolean;
     };
     const sourceUrl = findInstagramUrl(data?.url);
     if (!sourceUrl) return json({ error: "Informe uma URL válida de Reel público." }, { status: 400 });
     if (data.rightsConfirmed !== true) {
       return json({ error: "Confirme que o conteúdo pode ser baixado e utilizado." }, { status: 400 });
     }
-
     const email = authenticatedEmail(request);
     const result = await queueReel({
       messageId: `web-${crypto.randomUUID()}`,
       senderId: `web:${email}`,
       sourceUrl,
-      rules: sanitizeText(data.rules, 1000),
+      rules: sanitizeText(data.rules, 100),
       sourceAccount: sanitizeText(data.sourceAccount, 80),
       rightsConfirmed: true,
+      publicationMode: sanitizePublicationMode(data.publicationMode),
+      shareToFeed: data.shareToFeed !== false,
     }, env, ctx, baseUrl);
-
     return json(result, {
       status: result.accepted ? 202 : result.reason === "duplicate" ? 200 : 400,
     });
+  }
+
+  const publishMatch = url.pathname.match(/^\/api\/reels\/(\d+)\/publish$/);
+  if (publishMatch && request.method === "POST") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    if (!metaConnected(env)) {
+      return json({ error: "A conta @btsupply_ ainda precisa ser conectada à Meta." }, { status: 503 });
+    }
+    const record = await reelById(Number(publishMatch[1]), env);
+    if (!record) return json({ error: "Reel não encontrado." }, { status: 404 });
+    if (record.status !== "ready") return json({ error: "O MP4 ainda não está pronto." }, { status: 409 });
+    if (record.publish_status === "published") return json({ error: "Este Reel já foi publicado." }, { status: 409 });
+    ctx.waitUntil(publishReel(record, env, baseUrl));
+    return json({ accepted: true, id: record.id }, { status: 202 });
   }
 
   if (url.pathname === "/api/inbox/status" && request.method === "GET") {
     if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
     return json({
       user: authenticatedEmail(request),
-      notion: Boolean(env.NOTION_TOKEN && env.NOTION_DATABASE_ID),
+      instagram: metaConnected(env),
       resolver: Boolean(env.REEL_RESOLVER_URL),
       storage: true,
     });
@@ -507,12 +732,11 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
   if (url.pathname === "/api/integrations/status" && request.method === "GET") {
     if (!validAdmin(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
     return json({
-      inbox: {
-        allowedEmails: configuredInboxEmails(env).length,
-      },
-      notion: {
-        token: Boolean(env.NOTION_TOKEN),
-        database: Boolean(env.NOTION_DATABASE_ID),
+      inbox: { allowedEmails: configuredInboxEmails(env).length },
+      instagram: {
+        token: Boolean(env.INSTAGRAM_ACCESS_TOKEN),
+        userId: Boolean(env.INSTAGRAM_USER_ID),
+        apiVersion: env.INSTAGRAM_API_VERSION || null,
       },
       resolver: Boolean(env.REEL_RESOLVER_URL),
       storage: true,
@@ -521,16 +745,24 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
 
   if (url.pathname === "/api/reels/manual" && request.method === "POST") {
     if (!validAdmin(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
-    const data = await request.json() as { url?: string; rules?: string; sourceAccount?: string };
+    const data = await request.json() as {
+      url?: string;
+      rules?: string;
+      sourceAccount?: string;
+      publicationMode?: string;
+      shareToFeed?: boolean;
+    };
     const sourceUrl = findInstagramUrl(data?.url);
     if (!sourceUrl) return json({ error: "Informe uma URL válida de Reel público." }, { status: 400 });
     const result = await queueReel({
       messageId: `manual-${crypto.randomUUID()}`,
       senderId: "manual",
       sourceUrl,
-      rules: sanitizeText(data.rules, 1000),
+      rules: sanitizeText(data.rules, 100),
       sourceAccount: sanitizeText(data.sourceAccount, 80),
       rightsConfirmed: true,
+      publicationMode: sanitizePublicationMode(data.publicationMode),
+      shareToFeed: data.shareToFeed !== false,
     }, env, ctx, baseUrl);
     return json(result, { status: result.accepted ? 202 : result.reason === "duplicate" ? 200 : 400 });
   }
@@ -540,11 +772,7 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     if (!validAdmin(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
     const row = await env.DB.prepare(
       "SELECT storage_key, filename, content_type FROM reels WHERE id = ? AND status = 'ready'",
-    ).bind(Number(adminDownloadMatch[1])).first<{
-      storage_key: string;
-      filename: string;
-      content_type: string;
-    }>();
+    ).bind(Number(adminDownloadMatch[1])).first<{ storage_key: string; filename: string; content_type: string }>();
     return serveVideo(row, env);
   }
 
@@ -552,11 +780,7 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
   if (publicDownloadMatch && request.method === "GET") {
     const row = await env.DB.prepare(
       "SELECT storage_key, filename, content_type FROM reels WHERE public_token = ? AND status = 'ready'",
-    ).bind(publicDownloadMatch[1]).first<{
-      storage_key: string;
-      filename: string;
-      content_type: string;
-    }>();
+    ).bind(publicDownloadMatch[1]).first<{ storage_key: string; filename: string; content_type: string }>();
     return serveVideo(row, env);
   }
 

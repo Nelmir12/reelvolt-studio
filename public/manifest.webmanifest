@@ -1,7 +1,7 @@
 {
   "name": "BT Supply Reel Inbox",
   "short_name": "Reel Inbox",
-  "description": "Receba Reels autorizados, baixe o MP4 e registre o andamento no Notion.",
+  "description": "Baixe Reels autorizados, aprove e publique na BT Supply em um único painel.",
   "id": "/",
   "start_url": "/",
   "scope": "/",

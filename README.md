@@ -1,19 +1,26 @@
-# BT Supply Reel Inbox
+# BT Supply ReelVolt Studio
 
-Caixa de entrada privada e instalável para receber links de Reels, baixar o MP4,
-armazenar o arquivo e registrar o andamento no Notion. A publicação permanece
-manual.
+Painel privado e instalável para receber links de Reels autorizados, baixar o
+MP4 e, opcionalmente, publicar o vídeo na conta `@btsupply_` pela API oficial da
+Meta. D1 armazena os estados e métricas; R2 armazena os vídeos. O Notion não faz
+parte do fluxo operacional.
 
 ## Fluxo
 
-1. No Android, o usuário instala o site como aplicativo e compartilha um Reel
-   diretamente para **Reel Inbox**. Em outros aparelhos, copia e cola o link.
+1. No iPhone, o usuário copia o link de um Reel e abre o Reel Inbox pela Tela de
+   Início. Em plataformas compatíveis, o PWA também aceita compartilhamento.
 2. O site exige autenticação com ChatGPT e permite somente e-mails autorizados.
-3. O usuário informa a conta de origem, observações e confirma os direitos de uso.
-4. Links repetidos são identificados antes do download.
-5. O serviço tenta localizar o MP4 público do Reel.
-6. O arquivo é armazenado no R2 e os metadados ficam no D1.
-7. O registro correspondente é criado e atualizado no Notion.
+3. O usuário confirma os direitos e escolhe uma ação:
+   - **Preparar e aguardar aprovação** (padrão);
+   - **Publicar automaticamente** após o download;
+   - **Somente baixar o MP4**.
+4. O serviço identifica links repetidos e usa a instância privada do Cobalt
+   como fallback quando o Instagram exige login.
+5. O MP4 é armazenado no R2 e os estados, métricas e IDs da Meta ficam no D1.
+6. Toda publicação usa `public/reel-cover.jpg` e a legenda fixa configurada no
+   worker.
+7. Para publicar, o worker cria um contêiner de Reel, acompanha o processamento
+   e chama `media_publish` na API oficial da Meta.
 
 Use somente vídeos próprios, licenciados ou autorizados pelo titular.
 
@@ -24,59 +31,46 @@ As variáveis estão documentadas em `.env.example`:
 - `ADMIN_TOKEN`: protege diagnósticos e testes administrativos.
 - `PUBLIC_BASE_URL`: endereço público do serviço.
 - `INBOX_ALLOWED_EMAILS`: e-mails do ChatGPT autorizados, separados por vírgula.
-- `NOTION_TOKEN`: token da integração interna do Notion.
-- `NOTION_DATABASE_ID`: ID do banco **BT Supply — Reel Inbox**.
 - `REEL_RESOLVER_URL`, `REEL_RESOLVER_TOKEN` e
-  `REEL_RESOLVER_AUTH_SCHEME`: fallback privado quando o Instagram exige login.
-  O adaptador aceita a resposta da API do Cobalt e usa `Api-Key` como esquema
-  recomendado para uma instância própria.
+  `REEL_RESOLVER_AUTH_SCHEME`: fallback privado quando o Instagram exige login,
+  compatível com uma instância privada do Cobalt.
+- `INSTAGRAM_GRAPH_HOST`: `graph.instagram.com` para Instagram Login ou
+  `graph.facebook.com` para Facebook Login.
+- `INSTAGRAM_API_VERSION`: versão ativa configurada no aplicativo da Meta.
+- `INSTAGRAM_USER_ID`: ID profissional da conta que receberá os Reels.
+- `INSTAGRAM_ACCESS_TOKEN`: token com permissão de publicação.
+- `PUBLISH_URL_SECRET`: segredo aleatório usado para assinar links de mídia com
+  validade de duas horas.
 
-## Banco do Notion
+Com Instagram Login, o token precisa das permissões
+`instagram_business_basic` e `instagram_business_content_publish`.
 
-| Propriedade | Tipo |
-| --- | --- |
-| Nome | Título |
-| URL | URL |
-| Status | Seleção |
-| Regras | Texto |
-| Origem | Seleção |
-| ID | Número |
-| MP4 | URL |
-| Erro | Texto |
-| Conta de origem | Texto |
-| Direitos confirmados | Checkbox |
+## Rotas principais
 
-`Origem` usa o valor `Web`. Os status são `Na fila`, `Baixando`, `Pronto` e
-`Falhou`.
-
-## Rotas
-
-- `GET /`: caixa de entrada autenticada.
-- `POST /api/reels/intake`: recebe um Reel pela interface.
-- `GET /api/reels`: lista os últimos registros.
-- `GET /api/inbox/status`: mostra o estado das integrações para o usuário.
-- `GET /download/:token`: entrega o MP4 por um link secreto registrado no Notion.
+- `GET /`: painel autenticado.
+- `POST /api/reels/intake`: recebe um Reel e as opções de fluxo.
+- `GET /api/reels`: lista os registros recentes.
+- `GET /api/dashboard`: retorna métricas e estado das integrações.
+- `POST /api/reels/:id/publish`: aprova, retoma ou repete uma publicação.
+- `GET /download/:token`: entrega o MP4 ao usuário.
+- `GET /publish-media/:id.mp4`: link temporário assinado consumido pela Meta.
 - `GET /api/integrations/status`: diagnóstico administrativo.
-- `POST /api/reels/manual`: teste administrativo.
-- `GET /api/reels/:id/download`: download administrativo.
 
 ## Desenvolvimento local
 
-```bash
+```powershell
 copy .env.example .env
 npm install
 npm run dev
 ```
 
-## Limitação do download
+## Observações
 
 O canal de entrada não altera as restrições técnicas do Instagram. O serviço
-tenta primeiro o vídeo exposto publicamente e aceita um resolvedor externo
-próprio ou licenciado como fallback. Sites que proíbem bots, scripts ou acesso
-automatizado não devem ser usados como resolvedores.
+tenta primeiro o vídeo exposto publicamente e usa um resolvedor próprio ou
+licenciado como fallback. Sites que proíbem bots, scripts ou acesso automatizado
+não devem ser usados como resolvedores.
 
-Para o fallback gratuito, a opção recomendada é hospedar uma instância privada
-do [Cobalt](https://github.com/imputnet/cobalt) e protegê-la com uma chave de
-API. A API pública do projeto não deve ser consumida por automações sem
-permissão; use a documentação oficial para
-[executar sua própria instância](https://github.com/imputnet/cobalt/blob/main/docs/run-an-instance.md).
+A publicação segue o processo oficial da Meta: o vídeo precisa ficar disponível
+temporariamente por URL pública, o contêiner deve terminar com status
+`FINISHED` e só então o Reel é publicado.
