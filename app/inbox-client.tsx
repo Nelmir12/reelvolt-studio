@@ -85,10 +85,11 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText }: Inbox
   }, []);
 
   useEffect(() => {
-    void loadReels();
+    const initialLoad = window.setTimeout(() => void loadReels(), 0);
     if ("serviceWorker" in navigator) {
       void navigator.serviceWorker.register("/sw.js");
     }
+    return () => window.clearTimeout(initialLoad);
   }, [loadReels]);
 
   useEffect(() => {

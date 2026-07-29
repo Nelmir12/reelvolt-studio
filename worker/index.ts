@@ -19,6 +19,7 @@ interface Env {
   NOTION_DATABASE_ID?: string;
   REEL_RESOLVER_URL?: string;
   REEL_RESOLVER_TOKEN?: string;
+  REEL_RESOLVER_AUTH_SCHEME?: string;
 }
 
 interface ExecutionContext {
@@ -244,6 +245,7 @@ async function updateNotionRecord(
 }
 
 async function resolveVideo(sourceUrl: string, env: Env) {
+  let resolverFailure: string | null = null;
   const direct = await fetch(sourceUrl, {
     headers: {
       "user-agent": "Mozilla/5.0 (compatible; BTSupplyReelInbox/3.0)",
@@ -274,25 +276,52 @@ async function resolveVideo(sourceUrl: string, env: Env) {
     const resolver = await fetch(env.REEL_RESOLVER_URL, {
       method: "POST",
       headers: {
+        accept: "application/json",
         "content-type": "application/json",
-        ...(env.REEL_RESOLVER_TOKEN ? { authorization: `Bearer ${env.REEL_RESOLVER_TOKEN}` } : {}),
+        ...(env.REEL_RESOLVER_TOKEN ? {
+          authorization: `${env.REEL_RESOLVER_AUTH_SCHEME?.trim() || "Bearer"} ${env.REEL_RESOLVER_TOKEN}`,
+        } : {}),
       },
-      body: JSON.stringify({ url: sourceUrl }),
+      body: JSON.stringify({
+        url: sourceUrl,
+        downloadMode: "auto",
+        filenameStyle: "basic",
+        videoQuality: "max",
+      }),
     });
     if (resolver.ok) {
       const result = await resolver.json() as {
+        status?: string;
         videoUrl?: string;
         url?: string;
         download_url?: string;
+        tunnel?: string[];
+        picker?: Array<{ type?: string; url?: string }>;
+        error?: { code?: string };
       };
-      const videoUrl = result.videoUrl ?? result.url ?? result.download_url;
+      const pickedVideo = result.picker?.find((item) => item.type === "video" && item.url)?.url;
+      const videoUrl = result.videoUrl
+        ?? result.url
+        ?? result.download_url
+        ?? pickedVideo
+        ?? result.tunnel?.[0];
       if (typeof videoUrl === "string") {
         const response = await fetch(videoUrl, { redirect: "follow" });
         if (response.ok && response.body) return { response };
+        resolverFailure = `arquivo retornado com HTTP ${response.status}`;
+      } else {
+        resolverFailure = result.error?.code || `resposta ${result.status || "sem arquivo"}`;
       }
+    } else {
+      resolverFailure = `HTTP ${resolver.status}`;
     }
   }
-  throw new Error("O Instagram não disponibilizou um arquivo público para este Reel.");
+  if (resolverFailure) {
+    throw new Error(`O resolvedor não conseguiu obter este Reel (${resolverFailure}).`);
+  }
+  throw new Error(
+    "O Instagram exige login ou o Reel não está publicamente acessível. Configure o resolvedor privado para este tipo de link.",
+  );
 }
 
 async function processReel(record: ReelRecord, env: Env, baseUrl: string) {

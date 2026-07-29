@@ -26,8 +26,10 @@ As variáveis estão documentadas em `.env.example`:
 - `INBOX_ALLOWED_EMAILS`: e-mails do ChatGPT autorizados, separados por vírgula.
 - `NOTION_TOKEN`: token da integração interna do Notion.
 - `NOTION_DATABASE_ID`: ID do banco **BT Supply — Reel Inbox**.
-- `REEL_RESOLVER_URL` e `REEL_RESOLVER_TOKEN`: fallback opcional e licenciado
-  quando o Instagram não disponibilizar o arquivo publicamente.
+- `REEL_RESOLVER_URL`, `REEL_RESOLVER_TOKEN` e
+  `REEL_RESOLVER_AUTH_SCHEME`: fallback privado quando o Instagram exige login.
+  O adaptador aceita a resposta da API do Cobalt e usa `Api-Key` como esquema
+  recomendado para uma instância própria.
 
 ## Banco do Notion
 
@@ -72,3 +74,9 @@ O canal de entrada não altera as restrições técnicas do Instagram. O serviç
 tenta primeiro o vídeo exposto publicamente e aceita um resolvedor externo
 próprio ou licenciado como fallback. Sites que proíbem bots, scripts ou acesso
 automatizado não devem ser usados como resolvedores.
+
+Para o fallback gratuito, a opção recomendada é hospedar uma instância privada
+do [Cobalt](https://github.com/imputnet/cobalt) e protegê-la com uma chave de
+API. A API pública do projeto não deve ser consumida por automações sem
+permissão; use a documentação oficial para
+[executar sua própria instância](https://github.com/imputnet/cobalt/blob/main/docs/run-an-instance.md).

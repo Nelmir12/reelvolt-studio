@@ -55,9 +55,13 @@ test("declares the protected web intake, PWA share target and Notion flow", asyn
   assert.match(worker, /INBOX_ALLOWED_EMAILS/);
   assert.match(worker, /rightsConfirmed/);
   assert.match(worker, /NOTION_DATABASE_ID/);
+  assert.match(worker, /REEL_RESOLVER_AUTH_SCHEME/);
+  assert.match(worker, /result\.picker/);
+  assert.match(worker, /downloadMode: "auto"/);
   assert.match(worker, /public_token/);
   assert.doesNotMatch(worker, /TELEGRAM_BOT_TOKEN|telegram\/webhook/i);
   assert.match(manifest, /"share_target"/);
   assert.match(manifest, /"display": "standalone"/);
-  assert.match(readme, /Instagram não disponibilizar o arquivo publicamente/);
+  assert.match(readme, /fallback privado quando o Instagram exige login/);
+  assert.match(readme, /instância privada[\s\S]*Cobalt/);
 });
