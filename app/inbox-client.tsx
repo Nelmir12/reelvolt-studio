@@ -52,6 +52,7 @@ type InboxClientProps = {
 };
 
 const INSTAGRAM_URL = /https?:\/\/(?:www\.)?instagram\.com\/(?:reel|reels|p)\/[A-Za-z0-9_-]+[^\s<"]*/i;
+const REELS_PER_PAGE = 6;
 
 const DOWNLOAD_LABELS: Record<string, string> = {
   queued: "Na fila",
@@ -135,6 +136,12 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
   const [publishingId, setPublishingId] = useState<number | null>(null);
   const [notice, setNotice] = useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
   const [activeView, setActiveView] = useState<"inbox" | "dashboard">(initialView);
+  const [reelPage, setReelPage] = useState(1);
+  const reelPageCount = Math.max(1, Math.ceil(reels.length / REELS_PER_PAGE));
+  const visibleReels = useMemo(
+    () => reels.slice((reelPage - 1) * REELS_PER_PAGE, reelPage * REELS_PER_PAGE),
+    [reelPage, reels],
+  );
 
   const loadData = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -175,6 +182,10 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
     return () => window.clearInterval(timer);
   }, [loadData, reels]);
 
+  useEffect(() => {
+    setReelPage((current) => Math.min(current, reelPageCount));
+  }, [reelPageCount]);
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setNotice(null);
@@ -210,6 +221,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
         setUrl("");
         setSourceAccount("");
         setRightsConfirmed(false);
+        setReelPage(1);
       } else if (data.reason === "duplicate") {
         setNotice({ tone: "info", text: `Esse Reel já está registrado como #${data.id}.` });
       }
@@ -279,7 +291,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
               aria-current={activeView === "dashboard" ? "page" : undefined}
               onClick={() => switchView("dashboard")}
             >
-              Dashboard
+              Métricas
             </button>
           </nav>
           <div className="account">
@@ -436,8 +448,9 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
         ) : reels.length === 0 ? (
           <div className="empty-state">Seu primeiro Reel aparecerá aqui.</div>
         ) : (
+          <>
           <div className="reel-list">
-            {reels.map((reel) => {
+            {visibleReels.map((reel) => {
               const canPublish = reel.status === "ready"
                 && reel.publish_status !== "published"
                 && reel.publish_status !== "creating";
@@ -494,6 +507,30 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
               );
             })}
           </div>
+          <nav className="pagination-bar" aria-label="Paginação da produção recente">
+            <span>
+              Vídeos {(reelPage - 1) * REELS_PER_PAGE + 1}–{Math.min(reelPage * REELS_PER_PAGE, reels.length)}
+              {" "}de {reels.length}
+            </span>
+            <div>
+              <button
+                type="button"
+                onClick={() => setReelPage((current) => Math.max(1, current - 1))}
+                disabled={reelPage === 1}
+              >
+                Anterior
+              </button>
+              <strong>Página {reelPage} de {reelPageCount}</strong>
+              <button
+                type="button"
+                onClick={() => setReelPage((current) => Math.min(reelPageCount, current + 1))}
+                disabled={reelPage === reelPageCount}
+              >
+                Próxima
+              </button>
+            </div>
+          </nav>
+          </>
         )}
       </section>
         </>

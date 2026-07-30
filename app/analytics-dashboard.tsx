@@ -83,6 +83,7 @@ const compactNumber = new Intl.NumberFormat("pt-BR", {
   notation: "compact",
   maximumFractionDigits: 1,
 });
+const REELS_PER_PAGE = 6;
 
 function formatBytes(value: number) {
   if (!value) return "0 MB";
@@ -111,6 +112,7 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rankingPage, setRankingPage] = useState(1);
 
   const loadAnalytics = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -142,6 +144,16 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
     const timer = window.setTimeout(() => void loadAnalytics(true), 4200);
     return () => window.clearTimeout(timer);
   }, [analytics?.sync.refreshing, loadAnalytics, refreshing]);
+
+  const rankingPageCount = Math.max(1, Math.ceil((analytics?.reels.length ?? 0) / REELS_PER_PAGE));
+  const visibleInsightReels = useMemo(
+    () => analytics?.reels.slice((rankingPage - 1) * REELS_PER_PAGE, rankingPage * REELS_PER_PAGE) ?? [],
+    [analytics?.reels, rankingPage],
+  );
+
+  useEffect(() => {
+    setRankingPage((current) => Math.min(current, rankingPageCount));
+  }, [rankingPageCount]);
 
   async function refreshInsights() {
     setRefreshing(true);
@@ -328,7 +340,7 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
               <span>Reel</span><span>Views</span><span>Alcance</span><span>Interações</span>
               <span>Envios</span><span>Engaj.</span><span>Retenção</span>
             </div>
-            {analytics.reels.map((reel) => (
+            {visibleInsightReels.map((reel) => (
               <article className="insight-row" key={reel.id}>
                 <div className="insight-reel">
                   <span className="rank-number">#{reel.rank}</span>
@@ -358,6 +370,29 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
                 </div>
               </article>
             ))}
+            <nav className="pagination-bar" aria-label="Paginação do desempenho por Reel">
+              <span>
+                Reels {(rankingPage - 1) * REELS_PER_PAGE + 1}–{Math.min(rankingPage * REELS_PER_PAGE, analytics.reels.length)}
+                {" "}de {analytics.reels.length}
+              </span>
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setRankingPage((current) => Math.max(1, current - 1))}
+                  disabled={rankingPage === 1}
+                >
+                  Anterior
+                </button>
+                <strong>Página {rankingPage} de {rankingPageCount}</strong>
+                <button
+                  type="button"
+                  onClick={() => setRankingPage((current) => Math.min(rankingPageCount, current + 1))}
+                  disabled={rankingPage === rankingPageCount}
+                >
+                  Próxima
+                </button>
+              </div>
+            </nav>
           </div>
         ) : (
           <div className="history-empty">As publicações aparecerão aqui depois da primeira leitura de Insights.</div>

@@ -56,10 +56,12 @@ test("server-renders the analytics dashboard tab", async () => {
 });
 
 test("declares the protected intake, dashboard and official Meta publishing flow", async () => {
-  const [worker, readme, manifest] = await Promise.all([
+  const [worker, readme, manifest, inbox, analytics] = await Promise.all([
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
     readFile(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"),
+    readFile(new URL("../app/inbox-client.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/analytics-dashboard.tsx", import.meta.url), "utf8"),
   ]);
 
   assert.match(worker, /\/api\/reels\/intake/);
@@ -85,6 +87,10 @@ test("declares the protected intake, dashboard and official Meta publishing flow
   assert.doesNotMatch(worker, /TELEGRAM_BOT_TOKEN|telegram\/webhook/i);
   assert.match(manifest, /"share_target"/);
   assert.match(manifest, /"display": "standalone"/);
+  assert.match(inbox, /const REELS_PER_PAGE = 6/);
+  assert.match(inbox, /visibleReels\.map/);
+  assert.match(analytics, /const REELS_PER_PAGE = 6/);
+  assert.match(analytics, /visibleInsightReels\.map/);
   assert.match(readme, /fallback privado quando o Instagram exige login/);
   assert.match(readme, /instância privada[\s\S]*Cobalt/);
   assert.match(readme, /O Notion não faz\s+parte do fluxo operacional/);
