@@ -26,6 +26,13 @@ type Reel = {
   created_at: string;
   completed_at: string | null;
   published_at: string | null;
+  instagram_selected: boolean;
+  youtube_selected: boolean;
+  rights_basis: "owned" | "licensed" | null;
+  content_context: string | null;
+  made_for_kids: boolean;
+  contains_synthetic_media: boolean;
+  paid_product_placement: boolean;
   youtube: {
     status: string;
     error: string | null;
@@ -38,6 +45,8 @@ type Reel = {
     privacy_status: string;
     warning_long_claim: boolean;
     checks_confirmed_at: string | null;
+    uploaded_at: string | null;
+    published_at: string | null;
   } | null;
 };
 
@@ -108,6 +117,18 @@ const PUBLISH_LABELS: Record<string, string> = {
   failed: "Falha ao publicar",
   blocked: "Bloqueado pelo download",
   awaiting_metadata: "Gerando metadados",
+};
+
+type ApprovalDraft = {
+  reel: Reel;
+  instagram: boolean;
+  youtube: boolean;
+  rightsBasis: "owned" | "licensed";
+  context: string;
+  madeForKids: boolean;
+  containsSyntheticMedia: boolean;
+  paidProductPlacement: boolean;
+  rightsConfirmed: boolean;
 };
 
 const YOUTUBE_LABELS: Record<string, string> = {
@@ -209,6 +230,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [publishingId, setPublishingId] = useState<number | null>(null);
+  const [approvalDraft, setApprovalDraft] = useState<ApprovalDraft | null>(null);
   const [captionEnabled, setCaptionEnabled] = useState(true);
   const [caption, setCaption] = useState(EMPTY_DASHBOARD.settings.caption);
   const [coverMode, setCoverMode] = useState<Dashboard["settings"]["cover_mode"]>("fixed");
@@ -344,14 +366,50 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
     }
   }
 
-  async function publish(reel: Reel) {
+  function openApproval(reel: Reel) {
+    const instagramAlreadyPublished = reel.publish_status === "published";
+    setApprovalDraft({
+      reel,
+      instagram: instagramAlreadyPublished ? false : reel.instagram_selected,
+      youtube: reel.youtube_selected || instagramAlreadyPublished,
+      rightsBasis: reel.rights_basis || "licensed",
+      context: reel.content_context || "",
+      madeForKids: reel.made_for_kids,
+      containsSyntheticMedia: reel.contains_synthetic_media,
+      paidProductPlacement: reel.paid_product_placement,
+      rightsConfirmed: false,
+    });
+  }
+
+  async function publish(draft: ApprovalDraft) {
+    const reel = draft.reel;
+    if (!draft.instagram && !draft.youtube) {
+      setNotice({ tone: "error", text: "Selecione Instagram, YouTube ou ambos." });
+      return;
+    }
+    if (!draft.rightsConfirmed) {
+      setNotice({ tone: "error", text: "Confirme os direitos antes de aprovar." });
+      return;
+    }
     setNotice(null);
     setPublishingId(reel.id);
     try {
       const response = await fetch(`/api/reels/${reel.id}/publish`, {
         method: "POST",
         credentials: "same-origin",
-        headers: { accept: "application/json" },
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({
+          rightsConfirmed: true,
+          destinations: [
+            ...(draft.instagram ? ["instagram"] : []),
+            ...(draft.youtube ? ["youtube"] : []),
+          ],
+          rightsBasis: draft.rightsBasis,
+          context: draft.context,
+          madeForKids: draft.madeForKids,
+          containsSyntheticMedia: draft.containsSyntheticMedia,
+          paidProductPlacement: draft.paidProductPlacement,
+        }),
       });
       const data = await response.json() as {
         error?: string;
@@ -371,6 +429,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
             ? `Publicação do Reel #${reel.id} iniciada; o Short será enviado como privado.`
             : `Publicação do Reel #${reel.id} iniciada.`,
       });
+      setApprovalDraft(null);
       await loadData(true);
     } catch (error) {
       setNotice({
@@ -856,10 +915,17 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
           <>
           <div className="reel-list">
             {visibleReels.map((reel) => {
-              const canPublish = reel.status === "ready"
-                && ["not_requested", "awaiting_approval", "awaiting_setup", "failed", "processing", "publishing"].includes(reel.publish_status);
-              const canApproveAnyDestination = dashboard.settings.meta_connected
-                || Boolean(reel.youtube && dashboard.settings.youtube.configured);
+              const instagramAlreadyPublished = reel.publish_status === "published";
+              const youtubeCanBeAdded = instagramAlreadyPublished
+                && (!reel.youtube || ["awaiting_approval", "awaiting_setup", "failed", "blocked"].includes(reel.youtube.status));
+              const canPublish = reel.status === "ready" && (
+                youtubeCanBeAdded
+                || (!instagramAlreadyPublished
+                  && ["not_requested", "awaiting_approval", "awaiting_setup", "failed", "processing", "publishing"].includes(reel.publish_status))
+              );
+              const canApproveAnyDestination = instagramAlreadyPublished
+                ? dashboard.settings.youtube.configured
+                : dashboard.settings.meta_connected || dashboard.settings.youtube.configured;
               return (
                 <article className="reel-row" key={reel.id}>
                   {reel.cover_mode === "fixed" ? (
@@ -870,7 +936,19 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                   <div className="reel-main">
                     <div className="reel-topline">
                       <strong>#{reel.id} · {reel.source_account || "Origem não informada"}</strong>
-                      <span>{formatDate(reel.created_at)}</span>
+                      <span>Recebido {formatDate(reel.created_at)}</span>
+                    </div>
+                    <div className="reel-timeline" aria-label={`Datas do Reel ${reel.id}`}>
+                      <span>MP4 pronto <strong>{formatDate(reel.completed_at)}</strong></span>
+                      {reel.published_at ? (
+                        <span>Instagram <strong>{formatDate(reel.published_at)}</strong></span>
+                      ) : null}
+                      {reel.youtube?.uploaded_at ? (
+                        <span>YouTube enviado <strong>{formatDate(reel.youtube.uploaded_at)}</strong></span>
+                      ) : null}
+                      {reel.youtube?.published_at ? (
+                        <span>YouTube público <strong>{formatDate(reel.youtube.published_at)}</strong></span>
+                      ) : null}
                     </div>
                     <a className="source-link" href={reel.source_url} target="_blank" rel="noreferrer">
                       {reel.source_url}
@@ -879,6 +957,8 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                       <span className={`status-badge ${reel.status}`}>{DOWNLOAD_LABELS[reel.status] ?? reel.status}</span>
                       <span className={`publish-badge ${reel.publish_status}`}>{PUBLISH_LABELS[reel.publish_status] ?? reel.publish_status}</span>
                       <span className="mode-badge">{publicationModeLabel(reel.publication_mode)}</span>
+                      {reel.instagram_selected ? <span className="destination-badge">Instagram</span> : null}
+                      {reel.youtube_selected ? <span className="destination-badge youtube">YouTube</span> : null}
                     </div>
                     {reel.scheduled_for ? (
                       <p className="schedule-line">Programado para {formatDate(reel.scheduled_for)}</p>
@@ -910,23 +990,26 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                       <a className="action-primary" href={reel.instagram_permalink} target="_blank" rel="noreferrer">
                         Ver no Instagram
                       </a>
-                    ) : canPublish ? (
+                    ) : null}
+                    {canPublish ? (
                       <button
                         className="action-primary"
                         type="button"
-                        onClick={() => void publish(reel)}
+                        onClick={() => openApproval(reel)}
                         disabled={!canApproveAnyDestination || publishingId === reel.id}
                         title={!canApproveAnyDestination ? "Conecte ao menos uma plataforma primeiro" : undefined}
                       >
                         {publishingId === reel.id
                           ? "Iniciando…"
+                          : instagramAlreadyPublished
+                            ? "Publicar também no YouTube"
                           : reel.publish_status === "publishing"
                             ? "Atualizar publicação"
                           : reel.publish_status === "processing"
                             ? "Continuar publicação"
                             : dashboard.settings.auto_publish_enabled
                               ? "Aprovar para a fila"
-                              : "Aprovar e publicar"}
+                              : "Escolher destinos e aprovar"}
                       </button>
                     ) : null}
                     {reel.youtube?.studio_url ? (
@@ -1002,6 +1085,140 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
           </>
         )}
       </section>
+
+      {approvalDraft ? (
+        <div className="approval-overlay" role="presentation">
+          <form
+            className="approval-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="approval-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void publish(approvalDraft);
+            }}
+          >
+            <div className="approval-dialog-heading">
+              <div>
+                <span>APROVAÇÃO POR DESTINO</span>
+                <h2 id="approval-title">Reel #{approvalDraft.reel.id}</h2>
+                <p>Escolha onde este MP4 será publicado. Cada plataforma mantém seu próprio estado.</p>
+              </div>
+              <button type="button" onClick={() => setApprovalDraft(null)} aria-label="Fechar">
+                ×
+              </button>
+            </div>
+
+            <fieldset className="destination-picker">
+              <legend>Publicar em</legend>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={approvalDraft.instagram}
+                  disabled={approvalDraft.reel.publish_status === "published"}
+                  onChange={(event) => setApprovalDraft((current) =>
+                    current ? { ...current, instagram: event.target.checked } : current)}
+                />
+                <span>
+                  <strong>Instagram Reels</strong>
+                  <small>
+                    {approvalDraft.reel.publish_status === "published"
+                      ? "Já publicado; não será enviado novamente"
+                      : "Usa legenda e capa configuradas"}
+                  </small>
+                </span>
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={approvalDraft.youtube}
+                  onChange={(event) => setApprovalDraft((current) =>
+                    current ? { ...current, youtube: event.target.checked } : current)}
+                />
+                <span>
+                  <strong>YouTube Shorts</strong>
+                  <small>Upload privado; o modo público exige revisão posterior dos checks</small>
+                </span>
+              </label>
+            </fieldset>
+
+            <label>
+              Base dos direitos
+              <select
+                value={approvalDraft.rightsBasis}
+                onChange={(event) => setApprovalDraft((current) => current
+                  ? { ...current, rightsBasis: event.target.value as "owned" | "licensed" }
+                  : current)}
+              >
+                <option value="owned">Conteúdo próprio</option>
+                <option value="licensed">Conteúdo licenciado/autorizado</option>
+              </select>
+            </label>
+
+            <label>
+              Contexto para revisão <small>opcional</small>
+              <textarea
+                rows={3}
+                maxLength={800}
+                value={approvalDraft.context}
+                onChange={(event) => setApprovalDraft((current) =>
+                  current ? { ...current, context: event.target.value } : current)}
+                placeholder="Quem aparece, evento e fatos confirmados."
+              />
+            </label>
+
+            <div className="content-flags">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={approvalDraft.madeForKids}
+                  onChange={(event) => setApprovalDraft((current) =>
+                    current ? { ...current, madeForKids: event.target.checked } : current)}
+                />
+                Conteúdo infantil
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={approvalDraft.containsSyntheticMedia}
+                  onChange={(event) => setApprovalDraft((current) =>
+                    current ? { ...current, containsSyntheticMedia: event.target.checked } : current)}
+                />
+                Mídia sintética realista
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={approvalDraft.paidProductPlacement}
+                  onChange={(event) => setApprovalDraft((current) =>
+                    current ? { ...current, paidProductPlacement: event.target.checked } : current)}
+                />
+                Promoção paga
+              </label>
+            </div>
+
+            <label className="rights-check">
+              <input
+                type="checkbox"
+                checked={approvalDraft.rightsConfirmed}
+                onChange={(event) => setApprovalDraft((current) =>
+                  current ? { ...current, rightsConfirmed: event.target.checked } : current)}
+                required
+              />
+              <span>Confirmo os direitos e aprovo estes destinos para o Reel #{approvalDraft.reel.id}.</span>
+            </label>
+
+            <div className="approval-actions">
+              <button type="button" className="action-secondary" onClick={() => setApprovalDraft(null)}>
+                Cancelar
+              </button>
+              <button type="submit" className="action-primary" disabled={publishingId === approvalDraft.reel.id}>
+                {publishingId === approvalDraft.reel.id ? "Aprovando…" : "Aprovar destinos"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
         </>
       )}
     </main>

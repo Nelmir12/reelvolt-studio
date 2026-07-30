@@ -948,6 +948,23 @@ select:focus-visible {
   font-size: 8px;
 }
 
+.reel-timeline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  margin: 0 0 8px;
+}
+
+.reel-timeline span {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.reel-timeline strong {
+  color: var(--ink-soft);
+  font-weight: 650;
+}
+
 .source-link {
   display: block;
   overflow: hidden;
@@ -971,7 +988,8 @@ select:focus-visible {
 
 .status-badge,
 .publish-badge,
-.mode-badge {
+.mode-badge,
+.destination-badge {
   border: 1px solid var(--line-strong);
   border-radius: 999px;
   padding: 4px 7px;
@@ -1050,6 +1068,101 @@ select:focus-visible {
 
 .action-secondary:hover {
   color: var(--accent);
+}
+
+.approval-overlay {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow-y: auto;
+  padding: 24px;
+  background: rgba(20, 24, 31, .52);
+  backdrop-filter: blur(5px);
+}
+
+.approval-dialog {
+  display: grid;
+  width: min(620px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 22px;
+  background: var(--surface);
+  box-shadow: 0 24px 80px rgba(18, 24, 36, .24);
+}
+
+.approval-dialog > label {
+  display: grid;
+  gap: 7px;
+  color: var(--ink-soft);
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.approval-dialog select,
+.approval-dialog textarea {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+
+.approval-dialog-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.approval-dialog-heading span {
+  color: var(--accent);
+  font-size: 8px;
+  font-weight: 720;
+  letter-spacing: .08em;
+}
+
+.approval-dialog-heading h2 {
+  margin: 5px 0 4px;
+  font-size: 24px;
+  letter-spacing: -.04em;
+}
+
+.approval-dialog-heading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.approval-dialog-heading > button {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 20px;
+}
+
+.approval-actions {
+  display: grid;
+  grid-template-columns: 1fr 1.6fr;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.approval-actions .action-secondary {
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
 }
 
 .processing-label {
@@ -1234,6 +1347,62 @@ select:focus-visible {
 
 .performance-card.accent strong {
   color: var(--accent);
+}
+
+.destination-badge {
+  border-color: #cbd6fa;
+  background: var(--accent-soft);
+  color: #2646ad;
+}
+
+.destination-badge.youtube {
+  border-color: #f0c5c1;
+  background: #fff5f4;
+  color: #a6372e;
+}
+
+.period-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding: 16px 20px 20px;
+  background: var(--surface-subtle);
+}
+
+.period-summary article {
+  display: grid;
+  min-height: 104px;
+  align-content: space-between;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+  background: var(--surface);
+}
+
+.period-summary span,
+.period-summary small {
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.period-summary strong {
+  margin: 12px 0 8px;
+  color: var(--text);
+  font-size: clamp(25px, 3vw, 36px);
+  font-weight: 670;
+  line-height: 1;
+  letter-spacing: -.05em;
+}
+
+.period-summary > p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.45;
 }
 
 .metrics-grid {
@@ -1490,6 +1659,10 @@ select:focus-visible {
     grid-template-columns: repeat(3, 1fr);
   }
 
+  .period-summary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
   .performance-card {
     border-bottom: 1px solid var(--line);
   }
@@ -1645,6 +1818,11 @@ select:focus-visible {
   .metrics-grid,
   .analytics-operations {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .period-summary {
+    grid-template-columns: 1fr 1fr;
+    padding: 14px;
   }
 
   .package-panel {

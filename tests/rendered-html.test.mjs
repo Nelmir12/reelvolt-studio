@@ -89,7 +89,7 @@ test("declares the protected intake, dashboard and official multichannel publish
   assert.match(worker, /\"views\", \"reach\", \"likes\", \"comments\", \"saved\", \"shares\"/);
   assert.match(worker, /media_publish/);
   assert.match(worker, /reconcilePublishedReel/);
-  assert.match(worker, /WHERE status <> 'failed'/);
+  assert.match(worker, /WHERE r\.status <> 'failed'/);
   assert.match(worker, /cover_url/);
   assert.match(worker, /publish-media/);
   assert.match(worker, /studio_settings/);
@@ -112,10 +112,15 @@ test("declares the protected intake, dashboard and official multichannel publish
   assert.match(inbox, /const REELS_PER_PAGE = 6/);
   assert.match(inbox, /visibleReels\.map/);
   assert.match(inbox, /Aprovar para a fila/);
+  assert.match(inbox, /APROVAÇÃO POR DESTINO/);
+  assert.match(inbox, /Publicar também no YouTube/);
+  assert.match(inbox, /MP4 pronto/);
   assert.match(inbox, /Checks conferidos — publicar/);
   assert.doesNotMatch(inbox, /<option value="auto">/);
   assert.match(analytics, /const REELS_PER_PAGE = 6/);
   assert.match(analytics, /visibleInsightReels\.map/);
+  assert.match(analytics, /Últimos 7 dias/);
+  assert.match(analytics, /Últimos 30 dias/);
   assert.match(readme, /fallback privado quando o Instagram exige login/);
   assert.match(readme, /instância privada[\s\S]*Cobalt/);
   assert.match(readme, /O Notion não faz\s+parte do fluxo operacional/);

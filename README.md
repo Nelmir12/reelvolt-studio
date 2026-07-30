@@ -17,7 +17,9 @@ os vídeos. O Notion não faz parte do fluxo operacional.
    como fallback quando o Instagram exige login.
 5. O MP4 inalterado é armazenado uma vez no R2. O usuário escolhe Instagram,
    YouTube ou ambos; clientes antigos sem `destinations` permanecem
-   Instagram-only.
+   Instagram-only. A escolha é confirmada novamente na aprovação e um Reel já
+   publicado no Instagram pode usar o mesmo MP4 para entrar depois somente no
+   fluxo privado do YouTube, sem republicação no Instagram.
 6. Após a aprovação, um GitHub Action acionado sob demanda valida formato com
    FFprobe e envia o MP4 inalterado. Não existe polling ocioso nem serviço Render.
    Sem uma chave paga de IA, o Short recebe metadados provisórios neutros e exige
@@ -32,7 +34,9 @@ os vídeos. O Notion não faz parte do fluxo operacional.
    duas confirmações e o backend revalidar os gates e a auditoria do projeto da
    API.
 10. O Dashboard mantém métricas e rankings separados por plataforma, com
-    snapshots diários e nos marcos de 1h, 24h, 72h e 7 dias.
+    snapshots diários e nos marcos de 1h, 24h, 72h e 7 dias. O painel calcula
+    visualizações ganhas hoje, ontem, nos últimos 7 dias e nos últimos 30 dias,
+    além de preservar as datas de download e publicação por plataforma.
 
 Use somente vídeos próprios, licenciados ou autorizados pelo titular.
 
@@ -82,7 +86,8 @@ Com Instagram Login, o token precisa das permissões
 - `GET /api/analytics`: retorna visualizações, alcance, interações, histórico e
   recomendações.
 - `POST /api/analytics/refresh`: solicita uma nova leitura de Insights na Meta.
-- `POST /api/reels/:id/publish`: aprova para a fila, retoma ou repete uma publicação.
+- `POST /api/reels/:id/publish`: confirma direitos e destinos, aprova para a
+  fila e permite adicionar o YouTube posteriormente sem duplicar o Instagram.
 - `GET /api/youtube/oauth/start` e `GET /api/youtube/oauth/callback`: conectam e
   fixam o canal exato com state e PKCE.
 - `PATCH /api/reels/:id/youtube/metadata`: edita e remodera metadados.

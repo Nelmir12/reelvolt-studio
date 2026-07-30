@@ -112,6 +112,13 @@ type ReelListRow = ReelRecord & {
   published_at: string | null;
   created_at: string;
   completed_at: string | null;
+  instagram_selected: number;
+  youtube_selected: number;
+  rights_basis: "owned" | "licensed" | null;
+  content_context: string | null;
+  made_for_kids: number;
+  contains_synthetic_media: number;
+  paid_product_placement: number;
 };
 
 type InstagramCredentials = {
@@ -843,7 +850,7 @@ async function refreshReelInsights(target: PublishedReelInsightTarget, env: Env)
       env.DB.prepare(`INSERT INTO reel_insight_snapshots
         (reel_id, captured_date, views, reach, total_interactions, shares, saved,
           average_watch_time_ms, milestone, captured_minutes, captured_at)
-        VALUES (?, date('now'), ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(reel_id, captured_date) DO UPDATE SET views = excluded.views,
           reach = excluded.reach, total_interactions = excluded.total_interactions,
           shares = excluded.shares, saved = excluded.saved,
@@ -853,6 +860,7 @@ async function refreshReelInsights(target: PublishedReelInsightTarget, env: Env)
           captured_at = CURRENT_TIMESTAMP`)
         .bind(
           target.id,
+          analyticsDateKey(),
           metrics.views,
           metrics.reach,
           metrics.totalInteractions,
@@ -1303,13 +1311,21 @@ async function serveCover(
 }
 
 async function listReels(env: Env, baseUrl: string) {
-  const { results } = await env.DB.prepare(`SELECT id, source_url, rules, source_account,
-    rights_confirmed, public_token, storage_key, filename, content_type, size_bytes, status, error,
-    publication_mode, share_to_feed, caption, caption_enabled, cover_mode, cover_key,
-    approved_at, scheduled_for, publish_status, publish_error,
-    instagram_container_id, instagram_media_id, instagram_permalink, publish_requested_at,
-    published_at, created_at, completed_at
-    FROM reels WHERE status <> 'failed' ORDER BY id DESC LIMIT 80`).all<ReelListRow>();
+  const { results } = await env.DB.prepare(`SELECT r.id, r.source_url, r.rules, r.source_account,
+    r.rights_confirmed, r.public_token, r.storage_key, r.filename, r.content_type, r.size_bytes,
+    r.status, r.error, r.publication_mode, r.share_to_feed, r.caption, r.caption_enabled,
+    r.cover_mode, r.cover_key, r.approved_at, r.scheduled_for, r.publish_status, r.publish_error,
+    r.instagram_container_id, r.instagram_media_id, r.instagram_permalink, r.publish_requested_at,
+    r.published_at, r.created_at, r.completed_at,
+    COALESCE(cr.instagram_enabled,
+      CASE WHEN r.publication_mode = 'download_only' THEN 0 ELSE 1 END) AS instagram_selected,
+    COALESCE(cr.youtube_enabled, 0) AS youtube_selected,
+    cr.rights_basis, cr.context AS content_context,
+    COALESCE(cr.made_for_kids, 0) AS made_for_kids,
+    COALESCE(cr.contains_synthetic_media, 0) AS contains_synthetic_media,
+    COALESCE(cr.paid_product_placement, 0) AS paid_product_placement
+    FROM reels r LEFT JOIN content_reviews cr ON cr.reel_id = r.id
+    WHERE r.status <> 'failed' ORDER BY r.id DESC LIMIT 80`).all<ReelListRow>();
   const summaries = await youtubeSummaries(results.map((row) => row.id), env);
   return results.map((row) => ({
     ...row,
@@ -1318,8 +1334,112 @@ async function listReels(env: Env, baseUrl: string) {
       : null,
     public_token: undefined,
     storage_key: undefined,
+    instagram_selected: Boolean(row.instagram_selected),
+    youtube_selected: Boolean(row.youtube_selected),
+    made_for_kids: Boolean(row.made_for_kids),
+    contains_synthetic_media: Boolean(row.contains_synthetic_media),
+    paid_product_placement: Boolean(row.paid_product_placement),
     youtube: summaries.get(row.id) || null,
   }));
+}
+
+type ViewHistoryRow = {
+  captured_date: string;
+  views: number;
+  reach?: number;
+  total_interactions?: number;
+  shares?: number;
+  saved?: number;
+};
+
+function analyticsDateKey(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const value = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value || "";
+  return `${value("year")}-${value("month")}-${value("day")}`;
+}
+
+function shiftDateKey(value: string, days: number) {
+  const date = new Date(`${value}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function percentageChange(current: number | null, previous: number | null) {
+  if (current == null || previous == null || previous <= 0) return null;
+  return Number((((current - previous) / previous) * 100).toFixed(1));
+}
+
+function viewPeriodSummary(
+  currentViews: number,
+  history: ViewHistoryRow[],
+  oldestPublishedAt: string | null,
+) {
+  const today = analyticsDateKey();
+  const byDate = new Map(history.map((row) => [row.captured_date, Number(row.views || 0)]));
+  const cumulative = (date: string) => byDate.has(date) ? byDate.get(date) as number : null;
+  const delta = (end: number | null, start: number | null) =>
+    end == null || start == null ? null : Math.max(0, end - start);
+
+  const yesterdayKey = shiftDateKey(today, -1);
+  const dayBeforeKey = shiftDateKey(today, -2);
+  const weekStart = shiftDateKey(today, -7);
+  const priorWeekStart = shiftDateKey(today, -14);
+  const monthStart = shiftDateKey(today, -30);
+  const priorMonthStart = shiftDateKey(today, -60);
+
+  const yesterdayTotal = cumulative(yesterdayKey);
+  const dayBeforeTotal = cumulative(dayBeforeKey);
+  const oldestTimestamp = databaseTimestamp(oldestPublishedAt);
+  const oldestPublishedDate = Number.isFinite(oldestTimestamp)
+    ? analyticsDateKey(new Date(oldestTimestamp))
+    : null;
+  const weekBaseline = cumulative(weekStart)
+    ?? (oldestPublishedDate && oldestPublishedDate >= weekStart ? 0 : null);
+  const priorWeekBaseline = cumulative(priorWeekStart);
+  const monthBaseline = cumulative(monthStart)
+    ?? (oldestPublishedDate && oldestPublishedDate >= monthStart ? 0 : null);
+  const priorMonthBaseline = cumulative(priorMonthStart);
+  const todayViews = delta(currentViews, yesterdayTotal);
+  const yesterdayViews = delta(yesterdayTotal, dayBeforeTotal);
+  const weekViews = delta(currentViews, weekBaseline);
+  const previousWeekViews = delta(weekBaseline, priorWeekBaseline);
+  const monthViews = delta(currentViews, monthBaseline);
+  const previousMonthViews = delta(monthBaseline, priorMonthBaseline);
+
+  return {
+    timezone: "America/Sao_Paulo",
+    as_of: today,
+    today: {
+      views: todayViews,
+      previous_views: yesterdayViews,
+      change_percent: percentageChange(todayViews, yesterdayViews),
+      available: todayViews != null,
+    },
+    yesterday: {
+      views: yesterdayViews,
+      available: yesterdayViews != null,
+    },
+    week: {
+      views: weekViews,
+      previous_views: previousWeekViews,
+      change_percent: percentageChange(weekViews, previousWeekViews),
+      average_per_day: weekViews == null ? null : Math.round(weekViews / 7),
+      available: weekViews != null,
+    },
+    month: {
+      views: monthViews,
+      previous_views: previousMonthViews,
+      change_percent: percentageChange(monthViews, previousMonthViews),
+      average_per_day: monthViews == null ? null : Math.round(monthViews / 30),
+      available: monthViews != null,
+    },
+  };
 }
 
 async function dashboard(env: Env, baseUrl: string) {
@@ -1370,7 +1490,7 @@ async function dashboard(env: Env, baseUrl: string) {
 async function analyticsDashboard(env: Env, baseUrl: string) {
   const { results } = await env.DB.prepare(`SELECT
     r.id, r.source_account, r.source_url, r.instagram_media_id, r.instagram_permalink,
-    r.published_at, r.created_at,
+    r.published_at, r.created_at, r.completed_at,
     COALESCE(i.views, 0) AS views, COALESCE(i.reach, 0) AS reach,
     COALESCE(i.likes, 0) AS likes, COALESCE(i.comments, 0) AS comments,
     COALESCE(i.saved, 0) AS saved, COALESCE(i.shares, 0) AS shares,
@@ -1388,6 +1508,7 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
       instagram_permalink: string | null;
       published_at: string | null;
       created_at: string;
+      completed_at: string | null;
       views: number;
       reach: number;
       likes: number;
@@ -1404,7 +1525,7 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
     SUM(views) AS views, SUM(reach) AS reach, SUM(total_interactions) AS total_interactions,
     SUM(shares) AS shares, SUM(saved) AS saved
     FROM reel_insight_snapshots GROUP BY captured_date
-    ORDER BY captured_date DESC LIMIT 30`).all<{
+    ORDER BY captured_date DESC LIMIT 61`).all<{
       captured_date: string;
       views: number;
       reach: number;
@@ -1447,6 +1568,10 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
   const engagementRate = totals.reach ? (totals.interactions / totals.reach) * 100 : 0;
   const shareRate = totals.views ? (totals.shares / totals.views) * 100 : 0;
   const saveRate = totals.views ? (totals.saved / totals.views) * 100 : 0;
+  const oldestPublishedAt = results
+    .map((row) => row.published_at)
+    .filter((value): value is string => Boolean(value))
+    .sort()[0] || null;
   const recommendations: Array<{ title: string; body: string; tone: string }> = [];
 
   if (!successful.length) {
@@ -1504,9 +1629,11 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
       save_rate: Number(saveRate.toFixed(2)),
       total_watch_time_ms: totals.watchTimeMs,
     },
+    periods: viewPeriodSummary(totals.views, historyRows, oldestPublishedAt),
     reels: results.map((row, index) => ({
       ...row,
       rank: index + 1,
+      downloaded_at: row.completed_at,
       cover_url: `${baseUrl}${COVER_PATH}`,
       engagement_rate: row.reach
         ? Number(((row.total_interactions / row.reach) * 100).toFixed(2))
@@ -1733,7 +1860,53 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     const record = await reelById(Number(publishMatch[1]), env);
     if (!record) return json({ error: "Reel não encontrado." }, { status: 404 });
     if (record.status !== "ready") return json({ error: "O MP4 ainda não está pronto." }, { status: 409 });
-    if (record.publish_status === "published") return json({ error: "Este Reel já foi publicado." }, { status: 409 });
+    const data = await request.json().catch(() => ({})) as {
+      rightsConfirmed?: boolean;
+      destinations?: Array<"instagram" | "youtube">;
+      rightsBasis?: "owned" | "licensed";
+      context?: string;
+      madeForKids?: boolean;
+      containsSyntheticMedia?: boolean;
+      paidProductPlacement?: boolean;
+    };
+    if (Array.isArray(data.destinations)) {
+      const targets = sanitizeTargets(data.destinations, data, []);
+      if (!targets.instagramEnabled && !targets.youtubeEnabled) {
+        return json({ error: "Selecione Instagram, YouTube ou ambos." }, { status: 400 });
+      }
+      if (data.rightsConfirmed !== true) {
+        return json({ error: "Confirme os direitos antes de aprovar os destinos." }, { status: 400 });
+      }
+      await createContentTargets(record.id, targets, env);
+    }
+    const destinations = await publicationDestinations(record.id, env);
+    if (record.publish_status === "published") {
+      if (!destinations.youtube) {
+        return json({ error: "Este Reel já foi publicado no Instagram." }, { status: 409 });
+      }
+      const currentYouTube = await env.DB.prepare(
+        "SELECT status FROM youtube_publications WHERE reel_id = ?",
+      ).bind(record.id).first<{ status: string }>();
+      if (currentYouTube?.status === "published") {
+        return json({ error: "Este Reel já foi publicado no Instagram e no YouTube." }, { status: 409 });
+      }
+      const youtube = await queueYouTubePublication(
+        record.id,
+        record.source_account,
+        Boolean(record.rights_confirmed),
+        env,
+      );
+      await env.DB.prepare(
+        "UPDATE reels SET approved_at = COALESCE(approved_at, CURRENT_TIMESTAMP) WHERE id = ?",
+      ).bind(record.id).run();
+      return json({
+        accepted: true,
+        id: record.id,
+        queued: false,
+        instagramAlreadyPublished: true,
+        youtube,
+      }, { status: 202 });
+    }
     if (["creating", "processing", "publishing"].includes(record.publish_status)) {
       const youtube = await queueYouTubePublication(
         record.id,

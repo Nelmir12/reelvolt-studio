@@ -24,6 +24,7 @@ type InsightReel = {
   instagram_permalink: string | null;
   published_at: string | null;
   created_at: string;
+  downloaded_at: string | null;
   cover_url: string;
   views: number;
   reach: number;
@@ -40,6 +41,23 @@ type InsightReel = {
   updated_at: string | null;
 };
 
+type PeriodMetric = {
+  views: number | null;
+  previous_views?: number | null;
+  change_percent?: number | null;
+  average_per_day?: number | null;
+  available: boolean;
+};
+
+type ViewPeriods = {
+  timezone: string;
+  as_of: string;
+  today: PeriodMetric;
+  yesterday: PeriodMetric;
+  week: PeriodMetric;
+  month: PeriodMetric;
+};
+
 type Analytics = {
   summary: {
     published_reels: number;
@@ -52,6 +70,7 @@ type Analytics = {
     save_rate: number;
     total_watch_time_ms: number;
   };
+  periods: ViewPeriods;
   reels: InsightReel[];
   history: Array<{
     captured_date: string;
@@ -77,12 +96,18 @@ type Analytics = {
       average_view_percentage_bps: number;
       engagement_rate: number;
     };
+    periods: ViewPeriods;
+    history: Array<{
+      captured_date: string;
+      views: number;
+    }>;
     shorts: Array<{
       id: number;
       rank: number;
       video_id: string;
       video_url: string | null;
       published_at: string | null;
+      downloaded_at: string | null;
       source_account: string | null;
       views: number;
       engaged_views: number;
@@ -137,6 +162,60 @@ function formatWatchTime(milliseconds: number) {
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   return `${minutes}min ${seconds % 60}s`;
+}
+
+function periodValue(metric: PeriodMetric | undefined) {
+  return metric?.available && metric.views != null ? compactNumber.format(metric.views) : "—";
+}
+
+function periodComparison(metric: PeriodMetric | undefined, fallback: string) {
+  if (!metric?.available) return "Aguardando histórico suficiente";
+  if (metric.change_percent == null) {
+    return metric.average_per_day != null
+      ? `${compactNumber.format(metric.average_per_day)} por dia`
+      : fallback;
+  }
+  const signal = metric.change_percent > 0 ? "+" : "";
+  return `${signal}${metric.change_percent.toFixed(1).replace(".", ",")}% vs. período anterior`;
+}
+
+function PeriodSummary({ periods, platform }: { periods: ViewPeriods | undefined; platform: string }) {
+  const cards = [
+    {
+      label: "Hoje",
+      metric: periods?.today,
+      note: periodComparison(periods?.today, "visualizações desde 00h"),
+    },
+    {
+      label: "Ontem",
+      metric: periods?.yesterday,
+      note: periods?.yesterday.available
+        ? "visualizações acumuladas no dia"
+        : "Aguardando histórico suficiente",
+    },
+    {
+      label: "Últimos 7 dias",
+      metric: periods?.week,
+      note: periodComparison(periods?.week, "crescimento semanal"),
+    },
+    {
+      label: "Últimos 30 dias",
+      metric: periods?.month,
+      note: periodComparison(periods?.month, "crescimento mensal"),
+    },
+  ];
+  return (
+    <div className="period-summary" aria-label={`Resumo de visualizações do ${platform}`}>
+      {cards.map((card) => (
+        <article key={card.label}>
+          <span>{card.label}</span>
+          <strong>{periodValue(card.metric)}</strong>
+          <small>{card.note}</small>
+        </article>
+      ))}
+      <p>Fechamento diário no horário de Brasília. Períodos incompletos aparecem como indisponíveis.</p>
+    </div>
+  );
 }
 
 export default function AnalyticsDashboard({ account, operations }: AnalyticsDashboardProps) {
@@ -277,15 +356,18 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
         {loading ? (
           <div className="analytics-loading">Carregando desempenho…</div>
         ) : (
-          <div className="performance-grid">
-            {performanceCards.map((metric) => (
-              <article className={`performance-card ${metric.accent ? "accent" : ""}`} key={metric.label}>
-                <span>{metric.label}</span>
-                <strong>{metric.value}</strong>
-                <small>{metric.note}</small>
-              </article>
-            ))}
-          </div>
+          <>
+            <div className="performance-grid">
+              {performanceCards.map((metric) => (
+                <article className={`performance-card ${metric.accent ? "accent" : ""}`} key={metric.label}>
+                  <span>{metric.label}</span>
+                  <strong>{metric.value}</strong>
+                  <small>{metric.note}</small>
+                </article>
+              ))}
+            </div>
+            <PeriodSummary periods={analytics?.periods} platform="Instagram" />
+          </>
         )}
       </section>
 
@@ -328,6 +410,7 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
                 <small>atribuídos aos Shorts</small>
               </article>
             </div>
+            <PeriodSummary periods={analytics?.youtube.periods} platform="YouTube" />
             {analytics?.youtube.shorts.length ? (
               <div className="youtube-ranking">
                 {analytics.youtube.shorts.slice(0, 10).map((short) => (
@@ -339,6 +422,9 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
                         {number.format(short.views)} views · {number.format(short.engaged_views)} engaged ·
                         {" "}{number.format(short.likes)} likes · {number.format(short.comments)} comentários ·
                         {" "}{number.format(short.shares)} compartilhamentos
+                      </small>
+                      <small>
+                        MP4 pronto: {formatDate(short.downloaded_at)} · YouTube público: {formatDate(short.published_at)}
                       </small>
                     </div>
                     {short.video_url ? <a href={short.video_url} target="_blank" rel="noreferrer">Abrir</a> : null}
@@ -438,7 +524,8 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
                   <img src={reel.cover_url} alt="" />
                   <div>
                     <strong>Reel #{reel.id}</strong>
-                    <small>{formatDate(reel.published_at || reel.created_at)}</small>
+                    <small>Publicado: {formatDate(reel.published_at)}</small>
+                    <small>MP4 pronto: {formatDate(reel.downloaded_at)}</small>
                     {reel.instagram_permalink ? (
                       <a href={reel.instagram_permalink} target="_blank" rel="noreferrer">Abrir no Instagram</a>
                     ) : null}

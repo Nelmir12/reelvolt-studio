@@ -197,6 +197,9 @@ mais recente.
   aprovados.
 - Preserve informações claras de status, erro, agendamento e resultado da
   publicação.
+- Exiba separadamente datas de recebimento/download e de publicação por
+  plataforma. Resumos de hoje, ontem, 7 dias e 30 dias devem derivar de
+  snapshots reais e indicar quando ainda não houver histórico suficiente.
 
 ## Validação e qualidade
 
