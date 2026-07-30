@@ -26,6 +26,19 @@ type Reel = {
   created_at: string;
   completed_at: string | null;
   published_at: string | null;
+  youtube: {
+    status: string;
+    error: string | null;
+    title: string | null;
+    description: string | null;
+    tags: string[];
+    video_id: string | null;
+    video_url: string | null;
+    studio_url: string | null;
+    privacy_status: string;
+    warning_long_claim: boolean;
+    checks_confirmed_at: string | null;
+  } | null;
 };
 
 type Dashboard = {
@@ -38,6 +51,10 @@ type Dashboard = {
     failed: number;
     stored_bytes: number;
     last_seven_days: number;
+    youtube_processing: number;
+    youtube_awaiting_checks: number;
+    youtube_published: number;
+    youtube_failed: number;
   };
   settings: {
     meta_connected: boolean;
@@ -51,6 +68,13 @@ type Dashboard = {
     publish_interval_minutes: number;
     updated_at: string;
     account: string;
+    youtube: {
+      configured: boolean;
+      connected: boolean;
+      audited: boolean;
+      channel_id: string | null;
+      channel_title: string | null;
+    };
   };
 };
 
@@ -83,6 +107,22 @@ const PUBLISH_LABELS: Record<string, string> = {
   published: "Publicado",
   failed: "Falha ao publicar",
   blocked: "Bloqueado pelo download",
+  awaiting_metadata: "Gerando metadados",
+};
+
+const YOUTUBE_LABELS: Record<string, string> = {
+  awaiting_approval: "Aguardando aprovação",
+  awaiting_setup: "Aguardando conexão",
+  queued: "Na fila do YouTube",
+  retrying: "Retry programado",
+  preflight: "Validando formato",
+  analyzing: "Analisando conteúdo",
+  uploading: "Enviando privado",
+  processing: "YouTube processando",
+  awaiting_studio_check: "Conferir checks no Studio",
+  published: "Short público",
+  failed: "Falha no YouTube",
+  blocked: "YouTube bloqueado",
 };
 
 const EMPTY_DASHBOARD: Dashboard = {
@@ -95,6 +135,10 @@ const EMPTY_DASHBOARD: Dashboard = {
     failed: 0,
     stored_bytes: 0,
     last_seven_days: 0,
+    youtube_processing: 0,
+    youtube_awaiting_checks: 0,
+    youtube_published: 0,
+    youtube_failed: 0,
   },
   settings: {
     meta_connected: false,
@@ -108,6 +152,13 @@ const EMPTY_DASHBOARD: Dashboard = {
     publish_interval_minutes: 60,
     updated_at: "",
     account: "@btsupply_",
+    youtube: {
+      configured: false,
+      connected: false,
+      audited: false,
+      channel_id: null,
+      channel_title: null,
+    },
   },
 };
 
@@ -145,6 +196,13 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
   const [publicationMode, setPublicationMode] = useState<Reel["publication_mode"]>("approval");
   const [shareToFeed, setShareToFeed] = useState(true);
   const [rightsConfirmed, setRightsConfirmed] = useState(false);
+  const [instagramDestination, setInstagramDestination] = useState(true);
+  const [youtubeDestination, setYoutubeDestination] = useState(true);
+  const [rightsBasis, setRightsBasis] = useState<"owned" | "licensed">("owned");
+  const [contentContext, setContentContext] = useState("");
+  const [madeForKids, setMadeForKids] = useState(false);
+  const [containsSyntheticMedia, setContainsSyntheticMedia] = useState(false);
+  const [paidProductPlacement, setPaidProductPlacement] = useState(false);
   const [reels, setReels] = useState<Reel[]>([]);
   const [dashboard, setDashboard] = useState<Dashboard>(EMPTY_DASHBOARD);
   const [loading, setLoading] = useState(true);
@@ -207,9 +265,13 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
   }, [loadData]);
 
   useEffect(() => {
-    const activeStatuses = new Set(["queued", "downloading", "creating", "processing", "publishing"]);
+    const activeStatuses = new Set([
+      "queued", "downloading", "creating", "processing", "publishing", "preflight",
+      "analyzing", "uploading", "retrying", "awaiting_metadata",
+    ]);
     const hasActiveWork = reels.some((reel) =>
-      activeStatuses.has(reel.status) || activeStatuses.has(reel.publish_status));
+      activeStatuses.has(reel.status) || activeStatuses.has(reel.publish_status)
+      || activeStatuses.has(reel.youtube?.status || ""));
     if (!hasActiveWork) return;
     const timer = window.setInterval(() => void loadData(true), 4500);
     return () => window.clearInterval(timer);
@@ -217,6 +279,10 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (publicationMode !== "download_only" && !instagramDestination && !youtubeDestination) {
+      setNotice({ tone: "error", text: "Selecione Instagram, YouTube ou ambos." });
+      return;
+    }
     setNotice(null);
     setSubmitting(true);
     try {
@@ -231,6 +297,17 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
           publicationMode,
           shareToFeed,
           rightsConfirmed,
+          destinations: publicationMode === "download_only"
+            ? []
+            : [
+              ...(instagramDestination ? ["instagram"] : []),
+              ...(youtubeDestination ? ["youtube"] : []),
+            ],
+          rightsBasis,
+          context: contentContext,
+          madeForKids,
+          containsSyntheticMedia,
+          paidProductPlacement,
         }),
       });
       const data = await response.json() as {
@@ -249,6 +326,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
         setNotice({ tone: "success", text: `Reel #${data.id} recebido. ${action}` });
         setUrl("");
         setSourceAccount("");
+        setContentContext("");
         setRightsConfirmed(false);
         setReelPage(1);
       } else if (data.reason === "duplicate") {
@@ -274,19 +352,80 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
         credentials: "same-origin",
         headers: { accept: "application/json" },
       });
-      const data = await response.json() as { error?: string; queued?: boolean; scheduledFor?: string | null };
+      const data = await response.json() as {
+        error?: string;
+        queued?: boolean;
+        scheduledFor?: string | null;
+        awaitingMetadata?: boolean;
+        youtube?: { requested?: boolean; status?: string };
+      };
       if (!response.ok) throw new Error(data.error || "Não foi possível iniciar a publicação.");
       setNotice({
         tone: "success",
-        text: data.queued
+        text: data.awaitingMetadata
+          ? `Reel #${reel.id} aprovado. A análise preventiva prepara Instagram e o upload privado no YouTube.`
+          : data.queued
           ? `Reel #${reel.id} aprovado e programado para ${formatDate(data.scheduledFor || null)}.`
-          : `Publicação do Reel #${reel.id} iniciada.`,
+          : data.youtube?.requested
+            ? `Publicação do Reel #${reel.id} iniciada; o Short será enviado como privado.`
+            : `Publicação do Reel #${reel.id} iniciada.`,
       });
       await loadData(true);
     } catch (error) {
       setNotice({
         tone: "error",
         text: error instanceof Error ? error.message : "Não foi possível iniciar a publicação.",
+      });
+    } finally {
+      setPublishingId(null);
+    }
+  }
+
+  async function retryYouTube(reel: Reel) {
+    setNotice(null);
+    setPublishingId(reel.id);
+    try {
+      const response = await fetch(`/api/reels/${reel.id}/youtube/retry`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error || "Não foi possível reenfileirar o Short.");
+      setNotice({ tone: "success", text: `Short do Reel #${reel.id} reenfileirado sem criar duplicata.` });
+      await loadData(true);
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Não foi possível reenfileirar o Short.",
+      });
+    } finally {
+      setPublishingId(null);
+    }
+  }
+
+  async function releaseYouTube(reel: Reel) {
+    const confirmed = window.confirm(
+      "Você abriu o YouTube Studio e confirmou que os checks de direitos autorais e adequação estão limpos?",
+    );
+    if (!confirmed) return;
+    setNotice(null);
+    setPublishingId(reel.id);
+    try {
+      const response = await fetch(`/api/reels/${reel.id}/youtube/release`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({ checksConfirmed: true }),
+      });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error || "Não foi possível tornar o Short público.");
+      setNotice({ tone: "success", text: `Short do Reel #${reel.id} publicado após a confirmação dos checks.` });
+      await loadData(true);
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Não foi possível tornar o Short público.",
       });
     } finally {
       setPublishingId(null);
@@ -399,15 +538,33 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
           <h1>Produção</h1>
           <p>Acompanhe seus downloads, aprovações e publicações.</p>
         </div>
-        <div className="connection-card">
-          <span className={`connection-dot ${dashboard.settings.meta_connected ? "online" : ""}`} />
-          <div>
-            <strong>{dashboard.settings.meta_connected ? "Instagram conectado" : "Instagram aguardando conexão"}</strong>
-            <small>
-              {dashboard.settings.meta_connected
-                ? "Publicação oficial pela API da Meta"
-                : "Downloads funcionam; publicação fica bloqueada até a autorização"}
-            </small>
+        <div className="channel-connections">
+          <div className="connection-card">
+            <span className={`connection-dot ${dashboard.settings.meta_connected ? "online" : ""}`} />
+            <div>
+              <strong>{dashboard.settings.meta_connected ? "Instagram conectado" : "Instagram aguardando conexão"}</strong>
+              <small>{dashboard.settings.meta_connected ? "API oficial da Meta" : "Publicação fica aguardando autorização"}</small>
+            </div>
+          </div>
+          <div className="connection-card">
+            <span className={`connection-dot ${dashboard.settings.youtube.connected ? "online" : ""}`} />
+            <div>
+              <strong>
+                {dashboard.settings.youtube.connected
+                  ? dashboard.settings.youtube.channel_title || "YouTube conectado"
+                  : "YouTube aguardando conexão"}
+              </strong>
+              <small>
+                {dashboard.settings.youtube.connected
+                  ? "Uploads começam privados"
+                  : dashboard.settings.youtube.configured
+                    ? "Autorize o canal exato pelo Google"
+                    : "Configure as credenciais OAuth"}
+              </small>
+              {!dashboard.settings.youtube.connected && dashboard.settings.youtube.configured ? (
+                <a href="/api/youtube/oauth/start">Conectar YouTube</a>
+              ) : null}
+            </div>
           </div>
         </div>
       </section>
@@ -437,15 +594,36 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
           </label>
 
           <label>
-            Conta de origem <small>opcional</small>
+            Conta de origem <small>{youtubeDestination && rightsBasis === "owned" ? "obrigatória para YouTube próprio" : "opcional"}</small>
             <input
               type="text"
               placeholder="@criador"
               value={sourceAccount}
               onChange={(event) => setSourceAccount(event.target.value)}
               maxLength={80}
+              required={publicationMode !== "download_only" && youtubeDestination && rightsBasis === "owned"}
             />
           </label>
+
+          <fieldset className="destination-picker" disabled={publicationMode === "download_only"}>
+            <legend>Publicar em</legend>
+            <label>
+              <input
+                type="checkbox"
+                checked={instagramDestination}
+                onChange={(event) => setInstagramDestination(event.target.checked)}
+              />
+              <span><strong>Instagram Reels</strong><small>Legenda própria e capa configurada</small></span>
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={youtubeDestination}
+                onChange={(event) => setYoutubeDestination(event.target.checked)}
+              />
+              <span><strong>YouTube Shorts</strong><small>Upload privado; liberação manual após os checks</small></span>
+            </label>
+          </fieldset>
 
           <label>
             Ação após o download
@@ -463,11 +641,39 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
           </label>
 
           <label>
+            Contexto do vídeo <small>opcional</small>
+            <textarea
+              value={contentContext}
+              onChange={(event) => setContentContext(event.target.value)}
+              maxLength={800}
+              rows={3}
+              placeholder="Quem aparece, local, evento e fatos que a IA pode usar sem inventar."
+            />
+          </label>
+
+          <label>
+            Base dos direitos
+            <select
+              value={rightsBasis}
+              onChange={(event) => setRightsBasis(event.target.value as "owned" | "licensed")}
+            >
+              <option value="owned">Conteúdo próprio</option>
+              <option value="licensed">Conteúdo licenciado</option>
+            </select>
+          </label>
+
+          <div className="content-flags">
+            <label><input type="checkbox" checked={madeForKids} onChange={(event) => setMadeForKids(event.target.checked)} /> Conteúdo infantil</label>
+            <label><input type="checkbox" checked={containsSyntheticMedia} onChange={(event) => setContainsSyntheticMedia(event.target.checked)} /> Mídia sintética realista</label>
+            <label><input type="checkbox" checked={paidProductPlacement} onChange={(event) => setPaidProductPlacement(event.target.checked)} /> Promoção paga</label>
+          </div>
+
+          <label>
             Distribuição no Instagram
             <select
               value={shareToFeed ? "feed" : "reels"}
               onChange={(event) => setShareToFeed(event.target.value === "feed")}
-              disabled={publicationMode === "download_only"}
+              disabled={publicationMode === "download_only" || !instagramDestination}
             >
               <option value="feed">Feed + aba Reels</option>
               <option value="reels">Somente aba Reels</option>
@@ -603,6 +809,8 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
             {visibleReels.map((reel) => {
               const canPublish = reel.status === "ready"
                 && ["not_requested", "awaiting_approval", "awaiting_setup", "failed", "processing", "publishing"].includes(reel.publish_status);
+              const canApproveAnyDestination = dashboard.settings.meta_connected
+                || Boolean(reel.youtube && dashboard.settings.youtube.configured);
               return (
                 <article className="reel-row" key={reel.id}>
                   {reel.cover_mode === "fixed" ? (
@@ -628,6 +836,25 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                     ) : null}
                     {reel.error ? <p className="reel-error">{reel.error}</p> : null}
                     {reel.publish_error ? <p className="reel-error">{reel.publish_error}</p> : null}
+                    {reel.youtube ? (
+                      <div className="youtube-status">
+                        <div>
+                          <span className={`publish-badge youtube-${reel.youtube.status}`}>
+                            YouTube · {YOUTUBE_LABELS[reel.youtube.status] ?? reel.youtube.status}
+                          </span>
+                          {reel.youtube.privacy_status ? <small>{reel.youtube.privacy_status}</small> : null}
+                        </div>
+                        {reel.youtube.title ? <strong>{reel.youtube.title}</strong> : null}
+                        {reel.youtube.description ? <p>{reel.youtube.description}</p> : null}
+                        {reel.youtube.tags.length ? <small>{reel.youtube.tags.map((tag) => `#${tag.replace(/^#/, "")}`).join(" ")}</small> : null}
+                        {reel.youtube.warning_long_claim ? (
+                          <p className="reel-warning">
+                            Short acima de 60s: um claim ativo pode bloquear o vídeo globalmente.
+                          </p>
+                        ) : null}
+                        {reel.youtube.error ? <p className="reel-error">{reel.youtube.error}</p> : null}
+                      </div>
+                    ) : null}
                   </div>
                   <div className="reel-actions">
                     {reel.instagram_permalink ? (
@@ -639,8 +866,8 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                         className="action-primary"
                         type="button"
                         onClick={() => void publish(reel)}
-                        disabled={!dashboard.settings.meta_connected || publishingId === reel.id}
-                        title={!dashboard.settings.meta_connected ? "Conecte a conta à Meta primeiro" : undefined}
+                        disabled={!canApproveAnyDestination || publishingId === reel.id}
+                        title={!canApproveAnyDestination ? "Conecte ao menos uma plataforma primeiro" : undefined}
                       >
                         {publishingId === reel.id
                           ? "Iniciando…"
@@ -651,6 +878,31 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                             : dashboard.settings.auto_publish_enabled
                               ? "Aprovar para a fila"
                               : "Aprovar e publicar"}
+                      </button>
+                    ) : null}
+                    {reel.youtube?.studio_url ? (
+                      <a className="action-secondary" href={reel.youtube.studio_url} target="_blank" rel="noreferrer">
+                        Abrir checks no Studio
+                      </a>
+                    ) : null}
+                    {reel.youtube?.status === "awaiting_studio_check" ? (
+                      <button
+                        className="action-primary youtube-release"
+                        type="button"
+                        onClick={() => void releaseYouTube(reel)}
+                        disabled={publishingId === reel.id}
+                      >
+                        Checks conferidos — publicar
+                      </button>
+                    ) : null}
+                    {reel.youtube && ["failed", "retrying"].includes(reel.youtube.status) && !reel.youtube.video_id ? (
+                      <button
+                        className="action-secondary"
+                        type="button"
+                        onClick={() => void retryYouTube(reel)}
+                        disabled={publishingId === reel.id}
+                      >
+                        Tentar YouTube novamente
                       </button>
                     ) : null}
                     {reel.download_url ? (

@@ -18,8 +18,8 @@ ou alterar o projeto.
 ## Objetivo e arquitetura oficial
 
 O ReelVolt Studio é uma PWA privada para receber links de Reels autorizados,
-baixar os vídeos em MP4, gerenciar aprovação e fila de publicação e consultar
-Insights da conta `@btsupply_`.
+baixar os vídeos em MP4, gerenciar aprovação e distribuição multicanal e
+consultar Insights da conta `@btsupply_` e do canal YouTube conectado.
 
 O fluxo operacional atual é:
 
@@ -31,9 +31,14 @@ O fluxo operacional atual é:
 4. O MP4 é armazenado no R2, enquanto estados, preferências, identificadores e
    métricas ficam no D1.
 5. Reels destinados à publicação aguardam aprovação humana.
-6. Após a aprovação, podem ser publicados imediatamente ou pela fila
-   configurada, usando exclusivamente a API oficial da Meta.
-7. Os Insights oficiais alimentam o dashboard e o histórico de métricas.
+6. Após a aprovação, Instagram e YouTube mantêm estados independentes. O
+   Instagram usa exclusivamente a API oficial da Meta.
+7. Um executor Render autenticado analisa o mesmo MP4 e realiza upload retomável
+   no YouTube sempre como privado. Frames e áudio temporários são excluídos.
+8. O Short somente pode ficar público após processamento, gates internos,
+   auditoria da API e confirmação explícita dos checks no YouTube Studio.
+9. Insights oficiais de cada plataforma alimentam dashboards separados; alcance
+   do Instagram nunca é somado às views do YouTube.
 
 Notion, Telegram e Direct do Instagram não fazem parte do fluxo operacional
 atual. Referências remanescentes a essas integrações devem ser tratadas como
@@ -67,7 +72,7 @@ ou outro bucket R2 por conveniência.
 - Não automatize sites ou APIs cujos termos proíbam bots, scraping ou downloads
   automatizados. DownReels e ferramentas semelhantes não devem ser usados como
   backend sem uma autorização e uma licença compatíveis.
-- Use a API oficial da Meta para publicar e consultar Insights.
+- Use as APIs oficiais da Meta e do YouTube para publicar e consultar Insights.
 - Solicite apenas as permissões mínimas necessárias da Meta.
 - Nunca coloque senhas, tokens, códigos de verificação, chaves ou valores de
   `.env` em código, logs, commits, capturas ou mensagens.
@@ -105,11 +110,12 @@ O agente pode, sem confirmação adicional:
 - tornar público um recurso atualmente privado;
 - reduzir ou remover qualquer trava desta seção.
 
-A fila automática pode publicar sem uma nova intervenção somente quando o Reel
+A fila automática pode publicar no Instagram sem uma nova intervenção somente quando o Reel
 já tiver sido aprovado explicitamente pelo usuário. A aprovação feita no painel
 é autorização para aquele Reel; ela não autoriza outros itens. Uma autorização
 para implantar o site também não autoriza publicar conteúdo no Instagram, e
-vice-versa.
+vice-versa. A aprovação multicanal autoriza somente o upload privado no YouTube;
+a mudança para público exige a confirmação separada dos checks daquele Short.
 
 ## Git e preservação do trabalho
 

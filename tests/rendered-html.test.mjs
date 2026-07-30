@@ -37,6 +37,8 @@ test("server-renders the authenticated Reel Inbox", async () => {
   assert.match(html, /Área de trabalho/);
   assert.match(html, /<h1>Produção<\/h1>/);
   assert.match(html, /Novo Reel/);
+  assert.match(html, /Instagram Reels/);
+  assert.match(html, /YouTube Shorts/);
   assert.match(html, /Produção recente/);
   assert.match(html, /<h2>Publicação<\/h2>/);
   assert.match(html, /Usar legenda/);
@@ -53,16 +55,18 @@ test("server-renders the analytics dashboard tab", async () => {
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /<h1>Métricas<\/h1>/);
-  assert.match(html, /Visualizações totais|Carregando desempenho/);
+  assert.match(html, /Desempenho dos Reels|Carregando desempenho/);
+  assert.match(html, /Desempenho dos Shorts/);
   assert.match(html, /Visão operacional/);
   assert.match(html, /Como buscar mais views/);
   assert.match(html, /Desempenho por Reel/);
   assert.doesNotMatch(html, /Dados que viram/);
 });
 
-test("declares the protected intake, dashboard and official Meta publishing flow", async () => {
-  const [worker, readme, manifest, inbox, analytics] = await Promise.all([
+test("declares the protected intake, dashboard and official multichannel publishing flow", async () => {
+  const [worker, youtube, readme, manifest, inbox, analytics] = await Promise.all([
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
+    readFile(new URL("../worker/youtube.ts", import.meta.url), "utf8"),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
     readFile(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"),
     readFile(new URL("../app/inbox-client.tsx", import.meta.url), "utf8"),
@@ -93,16 +97,27 @@ test("declares the protected intake, dashboard and official Meta publishing flow
   assert.match(worker, /processPublicationQueue/);
   assert.match(worker, /publish-cover/);
   assert.match(worker, /PUBLISH_URL_SECRET/);
+  assert.match(worker, /queueYouTubePublication/);
+  assert.match(worker, /destinations/);
+  assert.match(youtube, /youtube\.upload/);
+  assert.match(youtube, /yt-analytics\.readonly/);
+  assert.match(youtube, /code_challenge_method/);
+  assert.match(youtube, /privacyStatus: "public"/);
+  assert.match(youtube, /YOUTUBE_API_AUDITED/);
+  assert.match(youtube, /awaiting_studio_check/);
+  assert.match(youtube, /status: range \? 206 : 200/);
   assert.doesNotMatch(worker, /TELEGRAM_BOT_TOKEN|telegram\/webhook/i);
   assert.match(manifest, /"share_target"/);
   assert.match(manifest, /"display": "standalone"/);
   assert.match(inbox, /const REELS_PER_PAGE = 6/);
   assert.match(inbox, /visibleReels\.map/);
   assert.match(inbox, /Aprovar para a fila/);
+  assert.match(inbox, /Checks conferidos — publicar/);
   assert.doesNotMatch(inbox, /<option value="auto">/);
   assert.match(analytics, /const REELS_PER_PAGE = 6/);
   assert.match(analytics, /visibleInsightReels\.map/);
   assert.match(readme, /fallback privado quando o Instagram exige login/);
   assert.match(readme, /instância privada[\s\S]*Cobalt/);
   assert.match(readme, /O Notion não faz\s+parte do fluxo operacional/);
+  assert.match(readme, /sempre cria o vídeo como privado/);
 });

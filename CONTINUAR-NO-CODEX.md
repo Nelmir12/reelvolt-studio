@@ -29,7 +29,7 @@ cd reelvolt-studio
 npm install
 ```
 
-Não copie arquivos `.env`, tokens da Meta ou chaves secretas. As credenciais de
+Não copie arquivos `.env`, tokens da Meta, Google, OpenAI ou chaves secretas. As credenciais de
 produção ficam armazenadas no Sites e não são publicadas no GitHub.
 
 ## 3. Abrir no Codex
@@ -58,14 +58,16 @@ npm run dev
 ```
 
 O ambiente local não recebe automaticamente os segredos de produção. Recursos
-que dependem da Meta ou do resolvedor podem aparecer desconectados localmente;
-isso não remove nem altera a configuração hospedada.
+que dependem da Meta, Google, OpenAI, Render ou do resolvedor podem aparecer
+desconectados localmente; isso não remove nem altera a configuração hospedada.
 
 Antes de enviar mudanças:
 
 ```powershell
-npm run build
-node --test tests/rendered-html.test.mjs
+npm run lint
+npm test
+npm --prefix youtube-uploader run check
+git diff --check
 git status
 ```
 
@@ -76,13 +78,29 @@ git status
 3. Revise o resumo da mudança.
 4. Autorize explicitamente a publicação de uma nova versão.
 5. Para uma publicação real no Instagram, confirme também o Reel específico.
+6. Para o YouTube, autorize separadamente o Short privado de teste e, depois dos
+   checks no Studio, a eventual liberação pública.
 
-## 6. Segurança
+## 6. Integrações externas do YouTube
+
+- Crie/prepare um projeto Google e um OAuth Client do tipo aplicação Web.
+- Cadastre `/api/youtube/oauth/callback` no domínio do ReelVolt como redirect URI.
+- Conclua a tela de consentimento e a auditoria da YouTube Data API fora do código.
+- Configure no Sites as variáveis `YOUTUBE_*`, `OPENAI_*` e
+  `OWNED_SOURCE_ACCOUNTS` descritas em `.env.example`.
+- Crie o serviço a partir de `render.yaml` somente após autorizar eventual
+  cobrança. No Render entram apenas `REELVOLT_BASE_URL` e
+  `YOUTUBE_WORKER_SECRET`.
+- Implante o executor antes da versão do Sites. O canary deve ser um vídeo
+  próprio, enviado e mantido privado durante toda a validação.
+
+## 7. Segurança
 
 - Nunca envie senhas, códigos de verificação ou tokens pelo chat.
 - Nunca adicione `.env` ao Git.
 - Não altere `project_id` em `.openai/hosting.json`.
 - Não remova as tabelas do D1 nem os objetos do R2.
+- Nunca copie o refresh token do YouTube para o Render.
 - Mantenha o GitHub privado enquanto o projeto contiver regras operacionais
   internas.
 
