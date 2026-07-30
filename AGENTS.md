@@ -64,6 +64,16 @@ O arquivo `.openai/hosting.json` identifica o projeto Sites existente. Reutilize
 sempre esse projeto e os bindings `DB` e `VIDEOS`; não crie outro site, outro D1
 ou outro bucket R2 por conveniência.
 
+### Convenção de versões
+
+- Comunique versões do produto no padrão `1.N`, em que `N` é o número sequencial
+  atribuído pelo Sites: a versão interna `15` corresponde a **ReelVolt 1.15** e
+  a versão interna `16` corresponde a **ReelVolt 1.16**.
+- Preserve os números e identificadores internos do Sites, pois eles não são
+  rótulos editáveis e são necessários para implantação e rollback.
+- Em autorizações, relatórios e documentação, informe o nome público e, quando
+  houver risco de ambiguidade operacional, também o número interno do Sites.
+
 ## Segurança, direitos e uso aceitável
 
 - Aceite somente vídeos próprios, licenciados ou autorizados pelo titular.

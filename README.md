@@ -5,6 +5,14 @@ Painel privado e instalável para receber links de Reels autorizados, baixar um
 oficiais. D1 armazena estados, credenciais criptografadas e métricas; R2 armazena
 os vídeos. O Notion não faz parte do fluxo operacional.
 
+## Versionamento
+
+As versões públicas do produto usam o padrão `1.N`, acompanhando o número
+sequencial gerado pelo Sites. Assim, a versão interna `15` é comunicada como
+**ReelVolt 1.15** e a próxima versão interna `16` será **ReelVolt 1.16**.
+Os identificadores numéricos históricos do Sites são preservados porque fazem
+parte do mecanismo de implantação e rollback.
+
 ## Fluxo
 
 1. No iPhone, o usuário copia o link de um Reel e abre o Reel Inbox pela Tela de
