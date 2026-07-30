@@ -194,12 +194,9 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
     <div className="analytics-view">
       <section className="analytics-hero">
         <div>
-          <span className="eyebrow">DASHBOARD · {account}</span>
-          <h1>Dados que viram<br /><em>mais views.</em></h1>
-          <p>
-            Compare o desempenho dos Reels, encontre padrões que merecem ser repetidos
-            e ajuste uma variável por vez.
-          </p>
+          <span className="eyebrow">{account}</span>
+          <h1>Métricas</h1>
+          <p>Desempenho dos seus Reels e visão geral da operação.</p>
         </div>
         <aside className="sync-card">
           <span className={`connection-dot ${analytics?.sync.status === "connected" ? "online" : ""}`} />
@@ -265,7 +262,7 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
         <div className="dashboard-section-heading">
           <div>
             <span>02 · OPERAÇÃO</span>
-            <h2>Ritmo do Reel Inbox</h2>
+            <h2>Visão operacional</h2>
           </div>
           <p>Estes são os indicadores do fluxo de download, aprovação e publicação.</p>
         </div>

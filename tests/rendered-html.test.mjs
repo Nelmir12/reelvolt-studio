@@ -33,13 +33,14 @@ test("server-renders the authenticated Reel Inbox", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>BT Supply Reel Inbox<\/title>/i);
-  assert.match(html, /Baixe/);
-  assert.match(html, /Aprove/);
-  assert.match(html, /Publique/);
+  assert.match(html, /<title>ReelVolt<\/title>/i);
+  assert.match(html, /Área de trabalho/);
+  assert.match(html, /<h1>Produção<\/h1>/);
   assert.match(html, /Novo Reel/);
   assert.match(html, /Produção recente/);
   assert.match(html, /Pacote padrão/);
+  assert.match(html, /reelvolt-icon-192\.png/);
+  assert.doesNotMatch(html, /Baixe\. Aprove\.|Um fluxo único|Reel Inbox<\/span>/i);
   assert.doesNotMatch(html, /Notion/);
   assert.doesNotMatch(html, /Telegram|Direct do Instagram|codex-preview|Building your site/i);
 });
@@ -48,11 +49,12 @@ test("server-renders the analytics dashboard tab", async () => {
   const response = await render({}, "/?view=dashboard");
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /Dados que viram/);
+  assert.match(html, /<h1>Métricas<\/h1>/);
   assert.match(html, /Visualizações totais|Carregando desempenho/);
-  assert.match(html, /Ritmo do Reel Inbox/);
+  assert.match(html, /Visão operacional/);
   assert.match(html, /Como buscar mais views/);
   assert.match(html, /Desempenho por Reel/);
+  assert.doesNotMatch(html, /Dados que viram/);
 });
 
 test("declares the protected intake, dashboard and official Meta publishing flow", async () => {

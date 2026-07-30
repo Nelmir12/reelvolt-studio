@@ -272,8 +272,8 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
     <main className="studio-shell">
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark">BT</span>
-          <span><strong>REELVOLT</strong><small>BT SUPPLY STUDIO</small></span>
+          <img className="brand-mark" src="/reelvolt-icon-192.png" alt="" />
+          <span><strong>ReelVolt</strong><small>Studio</small></span>
         </div>
         <div className="topbar-actions">
           <nav className="view-tabs" aria-label="Áreas do ReelVolt">
@@ -310,12 +310,9 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
         <>
       <section className="hero">
         <div className="hero-copy">
-          <span className="eyebrow">REEL INBOX · PAINEL PRIVADO</span>
-          <h1>Baixe. Aprove.<br /><em>Publique.</em></h1>
-          <p>
-            Um fluxo único para transformar links autorizados em MP4 e Reels prontos
-            para a conta {dashboard.settings.account}.
-          </p>
+          <span className="eyebrow">Área de trabalho</span>
+          <h1>Produção</h1>
+          <p>Acompanhe seus downloads, aprovações e publicações.</p>
         </div>
         <div className="connection-card">
           <span className={`connection-dot ${dashboard.settings.meta_connected ? "online" : ""}`} />
@@ -535,10 +532,6 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
       </section>
         </>
       )}
-
-      <footer>
-        <span>Instagram</span><i>→</i><span>Reel Inbox</span><i>→</i><span>MP4</span><i>→</i><span>Aprovação</span><i>→</i><span>@btsupply_</span>
-      </footer>
     </main>
   );
 }
