@@ -21,6 +21,11 @@ export const reels = sqliteTable("reels", {
   publicationMode: text("publication_mode").notNull().default("approval"),
   shareToFeed: integer("share_to_feed").notNull().default(1),
   caption: text("caption"),
+  captionEnabled: integer("caption_enabled").notNull().default(1),
+  coverMode: text("cover_mode").notNull().default("fixed"),
+  coverKey: text("cover_key"),
+  approvedAt: text("approved_at"),
+  scheduledFor: text("scheduled_for"),
   publishStatus: text("publish_status").notNull().default("not_requested"),
   publishError: text("publish_error"),
   instagramContainerId: text("instagram_container_id"),
@@ -30,6 +35,21 @@ export const reels = sqliteTable("reels", {
   publishedAt: text("published_at"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   completedAt: text("completed_at"),
+}, (table) => [
+  index("reels_publish_status_idx").on(table.publishStatus),
+  index("reels_schedule_idx").on(table.publishStatus, table.scheduledFor),
+]);
+
+export const studioSettings = sqliteTable("studio_settings", {
+  id: integer("id").primaryKey(),
+  captionEnabled: integer("caption_enabled").notNull().default(1),
+  defaultCaption: text("default_caption").notNull().default(""),
+  coverMode: text("cover_mode").notNull().default("fixed"),
+  fixedCoverKey: text("fixed_cover_key"),
+  fixedCoverContentType: text("fixed_cover_content_type"),
+  autoPublishEnabled: integer("auto_publish_enabled").notNull().default(0),
+  publishIntervalMinutes: integer("publish_interval_minutes").notNull().default(60),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
 export const authorizedSenders = sqliteTable("authorized_senders", {

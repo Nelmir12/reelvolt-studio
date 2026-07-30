@@ -27,4 +27,11 @@ type R2Bucket = {
   put(key: string, value: ReadableStream | ArrayBuffer | string | null, options?: unknown): Promise<unknown>;
   get(key: string): Promise<R2ObjectBody | null>;
   head(key: string): Promise<{ size: number } | null>;
+  delete(key: string): Promise<void>;
+};
+
+type ScheduledController = {
+  scheduledTime: number;
+  cron: string;
+  noRetry(): void;
 };

@@ -12,16 +12,18 @@ parte do fluxo operacional.
 2. O site exige autenticação com ChatGPT e permite somente e-mails autorizados.
 3. O usuário confirma os direitos e escolhe uma ação:
    - **Preparar e aguardar aprovação** (padrão);
-   - **Publicar automaticamente** após o download;
    - **Somente baixar o MP4**.
 4. O serviço identifica links repetidos e usa a instância privada do Cobalt
    como fallback quando o Instagram exige login.
 5. O MP4 é armazenado no R2 e os estados, métricas e IDs da Meta ficam no D1.
-6. Toda publicação usa `public/reel-cover.jpg` e a legenda fixa configurada no
-   worker.
-7. Para publicar, o worker cria um contêiner de Reel, acompanha o processamento
+6. O painel permite salvar uma legenda padrão editável, desativar a legenda,
+   enviar uma capa fixa ao R2 ou publicar sem capa personalizada.
+7. A fila automática é opcional. Todo Reel precisa ser aprovado previamente e
+   recebe um horário conforme o intervalo configurado; alterar os padrões não
+   muda itens já aprovados.
+8. Para publicar, o worker cria um contêiner de Reel, acompanha o processamento
    e chama `media_publish` na API oficial da Meta.
-8. A aba Dashboard consulta Insights oficiais, soma visualizações e interações,
+9. A aba Dashboard consulta Insights oficiais, soma visualizações e interações,
    cria um ranking por Reel e registra uma amostra diária no D1.
 
 Use somente vídeos próprios, licenciados ou autorizados pelo titular.
@@ -54,12 +56,16 @@ Com Instagram Login, o token precisa das permissões
 - `POST /api/reels/intake`: recebe um Reel e as opções de fluxo.
 - `GET /api/reels`: lista os registros recentes.
 - `GET /api/dashboard`: retorna métricas e estado das integrações.
+- `PUT /api/studio-settings`: salva legenda, capa e intervalo da fila.
+- `POST /api/studio-settings/cover`: envia uma nova capa fixa ao R2.
 - `GET /api/analytics`: retorna visualizações, alcance, interações, histórico e
   recomendações.
 - `POST /api/analytics/refresh`: solicita uma nova leitura de Insights na Meta.
-- `POST /api/reels/:id/publish`: aprova, retoma ou repete uma publicação.
+- `POST /api/reels/:id/publish`: aprova para a fila, retoma ou repete uma publicação.
+- `POST /api/publication-queue/process`: processa manualmente um item vencido.
 - `GET /download/:token`: entrega o MP4 ao usuário.
 - `GET /publish-media/:id.mp4`: link temporário assinado consumido pela Meta.
+- `GET /publish-cover/:id.jpg`: capa temporária assinada consumida pela Meta.
 - `GET /api/integrations/status`: diagnóstico administrativo.
 
 ## Desenvolvimento local

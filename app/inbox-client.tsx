@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AnalyticsDashboard from "./analytics-dashboard";
 
 type Reel = {
@@ -15,6 +15,10 @@ type Reel = {
   publication_mode: "download_only" | "approval" | "auto";
   share_to_feed: number;
   caption: string | null;
+  caption_enabled: number;
+  cover_mode: "fixed" | "video" | "none";
+  approved_at: string | null;
+  scheduled_for: string | null;
   publish_status: string;
   publish_error: string | null;
   instagram_permalink: string | null;
@@ -40,6 +44,12 @@ type Dashboard = {
     resolver_connected: boolean;
     cover_url: string;
     caption: string;
+    caption_enabled: boolean;
+    cover_mode: "fixed" | "video" | "none";
+    has_custom_cover: boolean;
+    auto_publish_enabled: boolean;
+    publish_interval_minutes: number;
+    updated_at: string;
     account: string;
   };
 };
@@ -91,6 +101,12 @@ const EMPTY_DASHBOARD: Dashboard = {
     resolver_connected: false,
     cover_url: "/reel-cover.jpg",
     caption: "V arrived at #VogueWorld: Hollywood in unmistakable style, enjoying the live performances while showcasing the effortless elegance he's become known for. Another runway-worthy moment. #Taehyung",
+    caption_enabled: true,
+    cover_mode: "fixed",
+    has_custom_cover: false,
+    auto_publish_enabled: false,
+    publish_interval_minutes: 60,
+    updated_at: "",
     account: "@btsupply_",
   },
 };
@@ -134,13 +150,22 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [publishingId, setPublishingId] = useState<number | null>(null);
+  const [captionEnabled, setCaptionEnabled] = useState(true);
+  const [caption, setCaption] = useState(EMPTY_DASHBOARD.settings.caption);
+  const [coverMode, setCoverMode] = useState<Dashboard["settings"]["cover_mode"]>("fixed");
+  const [coverFile, setCoverFile] = useState<File | null>(null);
+  const [autoPublishEnabled, setAutoPublishEnabled] = useState(false);
+  const [publishIntervalMinutes, setPublishIntervalMinutes] = useState(60);
+  const [savingSettings, setSavingSettings] = useState(false);
   const [notice, setNotice] = useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
   const [activeView, setActiveView] = useState<"inbox" | "dashboard">(initialView);
   const [reelPage, setReelPage] = useState(1);
+  const settingsInitialized = useRef(false);
   const reelPageCount = Math.max(1, Math.ceil(reels.length / REELS_PER_PAGE));
+  const currentReelPage = Math.min(reelPage, reelPageCount);
   const visibleReels = useMemo(
-    () => reels.slice((reelPage - 1) * REELS_PER_PAGE, reelPage * REELS_PER_PAGE),
-    [reelPage, reels],
+    () => reels.slice((currentReelPage - 1) * REELS_PER_PAGE, currentReelPage * REELS_PER_PAGE),
+    [currentReelPage, reels],
   );
 
   const loadData = useCallback(async (quiet = false) => {
@@ -155,6 +180,14 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
       const dashboardData = await dashboardResponse.json() as Dashboard;
       setReels(reelsData.reels ?? []);
       setDashboard(dashboardData);
+      if (!settingsInitialized.current) {
+        settingsInitialized.current = true;
+        setCaptionEnabled(dashboardData.settings.caption_enabled);
+        setCaption(dashboardData.settings.caption);
+        setCoverMode(dashboardData.settings.cover_mode);
+        setAutoPublishEnabled(dashboardData.settings.auto_publish_enabled);
+        setPublishIntervalMinutes(dashboardData.settings.publish_interval_minutes);
+      }
     } catch (error) {
       if (!quiet) {
         setNotice({
@@ -181,10 +214,6 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
     const timer = window.setInterval(() => void loadData(true), 4500);
     return () => window.clearInterval(timer);
   }, [loadData, reels]);
-
-  useEffect(() => {
-    setReelPage((current) => Math.min(current, reelPageCount));
-  }, [reelPageCount]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -245,9 +274,14 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
         credentials: "same-origin",
         headers: { accept: "application/json" },
       });
-      const data = await response.json() as { error?: string };
+      const data = await response.json() as { error?: string; queued?: boolean; scheduledFor?: string | null };
       if (!response.ok) throw new Error(data.error || "Não foi possível iniciar a publicação.");
-      setNotice({ tone: "success", text: `Publicação do Reel #${reel.id} iniciada.` });
+      setNotice({
+        tone: "success",
+        text: data.queued
+          ? `Reel #${reel.id} aprovado e programado para ${formatDate(data.scheduledFor || null)}.`
+          : `Publicação do Reel #${reel.id} iniciada.`,
+      });
       await loadData(true);
     } catch (error) {
       setNotice({
@@ -256,6 +290,57 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
       });
     } finally {
       setPublishingId(null);
+    }
+  }
+
+  async function saveSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setNotice(null);
+    setSavingSettings(true);
+    try {
+      const response = await fetch("/api/studio-settings", {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({
+          captionEnabled,
+          caption,
+          coverMode,
+          autoPublishEnabled,
+          publishIntervalMinutes,
+        }),
+      });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error || "Não foi possível salvar as preferências.");
+
+      if (coverMode === "fixed" && coverFile) {
+        const formData = new FormData();
+        formData.set("cover", coverFile);
+        const upload = await fetch("/api/studio-settings/cover", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { accept: "application/json" },
+          body: formData,
+        });
+        const uploadData = await upload.json() as { error?: string };
+        if (!upload.ok) throw new Error(uploadData.error || "Não foi possível enviar a capa.");
+      }
+
+      setCoverFile(null);
+      setNotice({
+        tone: "success",
+        text: autoPublishEnabled
+          ? "Preferências salvas. Novos Reels aprovados entrarão na fila automática."
+          : "Preferências salvas. As publicações continuarão manuais após a aprovação.",
+      });
+      await loadData(true);
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Não foi possível salvar as preferências.",
+      });
+    } finally {
+      setSavingSettings(false);
     }
   }
 
@@ -369,12 +454,10 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
               onChange={(event) => setPublicationMode(event.target.value as Reel["publication_mode"])}
             >
               <option value="approval">Preparar e aguardar aprovação</option>
-              <option value="auto">Publicar automaticamente</option>
               <option value="download_only">Somente baixar o MP4</option>
             </select>
             <small className="field-help">
-              {publicationMode === "approval" && "Recomendado: você confere o vídeo antes de publicar."}
-              {publicationMode === "auto" && "O Reel será publicado assim que o MP4 estiver pronto."}
+              {publicationMode === "approval" && "Você confere e aprova o vídeo antes de ele entrar na fila."}
               {publicationMode === "download_only" && "O arquivo fica salvo, sem criar publicação."}
             </small>
           </label>
@@ -406,24 +489,94 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
           </button>
         </form>
 
-        <aside className="package-panel">
+        <form className="package-panel" onSubmit={saveSettings}>
           <div className="section-heading">
             <span>02</span>
             <div>
-              <h2>Pacote padrão</h2>
-              <p>Aplicado automaticamente a todas as publicações.</p>
+              <h2>Publicação</h2>
+              <p>Preferências usadas quando você aprovar um Reel.</p>
             </div>
           </div>
-          <div className="cover-frame">
-            {/* A capa é um asset fornecido pelo proprietário da conta. */}
-            <img src={dashboard.settings.cover_url} alt="Capa padrão dos Reels da BT Supply" />
-            <span>CAPA FIXA</span>
+
+          <div className="cover-settings">
+            <div className={`cover-frame ${coverMode !== "fixed" ? "cover-placeholder" : ""}`}>
+              {coverMode === "fixed" ? (
+                <img src={dashboard.settings.cover_url} alt="Prévia da capa padrão" />
+              ) : (
+                <div>
+                  <strong>{coverMode === "video" ? "Quadro do vídeo" : "Sem capa personalizada"}</strong>
+                  <small>O Instagram selecionará a miniatura.</small>
+                </div>
+              )}
+              <span>{coverMode === "fixed" ? "CAPA FIXA" : "CAPA DO VÍDEO"}</span>
+            </div>
+            <label className="file-button">
+              Trocar imagem
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={(event) => {
+                  setCoverFile(event.target.files?.[0] || null);
+                  if (event.target.files?.[0]) setCoverMode("fixed");
+                }}
+              />
+            </label>
+            {coverFile ? <small className="selected-file">{coverFile.name}</small> : null}
           </div>
-          <div className="caption-block">
-            <span>LEGENDA FIXA</span>
-            <p>{dashboard.settings.caption}</p>
+
+          <div className="publication-settings">
+            <fieldset>
+              <legend>Capa</legend>
+              <label><input type="radio" checked={coverMode === "fixed"} onChange={() => setCoverMode("fixed")} /> Imagem fixa</label>
+              <label><input type="radio" checked={coverMode === "video"} onChange={() => setCoverMode("video")} /> Quadro do vídeo</label>
+              <label><input type="radio" checked={coverMode === "none"} onChange={() => setCoverMode("none")} /> Sem capa personalizada</label>
+            </fieldset>
+
+            <label className="settings-toggle">
+              <input type="checkbox" checked={captionEnabled} onChange={(event) => setCaptionEnabled(event.target.checked)} />
+              <span><strong>Usar legenda</strong><small>Fica salva como padrão editável.</small></span>
+            </label>
+            <textarea
+              aria-label="Legenda padrão"
+              value={caption}
+              onChange={(event) => setCaption(event.target.value)}
+              disabled={!captionEnabled}
+              maxLength={2200}
+              rows={5}
+              placeholder="Escreva a legenda padrão…"
+            />
+            <small className="character-count">{caption.length}/2200</small>
+
+            <label className="settings-toggle">
+              <input
+                type="checkbox"
+                checked={autoPublishEnabled}
+                onChange={(event) => setAutoPublishEnabled(event.target.checked)}
+              />
+              <span><strong>Fila automática</strong><small>Somente Reels aprovados entram na programação.</small></span>
+            </label>
+            <label className="interval-field">
+              Intervalo entre publicações
+              <select
+                value={publishIntervalMinutes}
+                onChange={(event) => setPublishIntervalMinutes(Number(event.target.value))}
+                disabled={!autoPublishEnabled}
+              >
+                <option value={15}>15 minutos</option>
+                <option value={30}>30 minutos</option>
+                <option value={60}>1 hora</option>
+                <option value={120}>2 horas</option>
+                <option value={240}>4 horas</option>
+                <option value={480}>8 horas</option>
+                <option value={720}>12 horas</option>
+                <option value={1440}>24 horas</option>
+              </select>
+            </label>
+            <button className="primary-button settings-save" type="submit" disabled={savingSettings}>
+              {savingSettings ? "Salvando…" : "Salvar preferências"}
+            </button>
           </div>
-        </aside>
+        </form>
       </section>
 
       <section className="queue-panel">
@@ -449,11 +602,14 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
           <div className="reel-list">
             {visibleReels.map((reel) => {
               const canPublish = reel.status === "ready"
-                && reel.publish_status !== "published"
-                && reel.publish_status !== "creating";
+                && ["not_requested", "awaiting_approval", "awaiting_setup", "failed", "processing", "publishing"].includes(reel.publish_status);
               return (
                 <article className="reel-row" key={reel.id}>
-                  <img className="reel-cover" src={dashboard.settings.cover_url} alt="" />
+                  {reel.cover_mode === "fixed" ? (
+                    <img className="reel-cover" src={dashboard.settings.cover_url} alt="" />
+                  ) : (
+                    <div className="reel-cover reel-cover-placeholder">VÍDEO</div>
+                  )}
                   <div className="reel-main">
                     <div className="reel-topline">
                       <strong>#{reel.id} · {reel.source_account || "Origem não informada"}</strong>
@@ -467,6 +623,9 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                       <span className={`publish-badge ${reel.publish_status}`}>{PUBLISH_LABELS[reel.publish_status] ?? reel.publish_status}</span>
                       <span className="mode-badge">{publicationModeLabel(reel.publication_mode)}</span>
                     </div>
+                    {reel.scheduled_for ? (
+                      <p className="schedule-line">Programado para {formatDate(reel.scheduled_for)}</p>
+                    ) : null}
                     {reel.error ? <p className="reel-error">{reel.error}</p> : null}
                     {reel.publish_error ? <p className="reel-error">{reel.publish_error}</p> : null}
                   </div>
@@ -489,7 +648,9 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                             ? "Atualizar publicação"
                           : reel.publish_status === "processing"
                             ? "Continuar publicação"
-                            : "Aprovar e publicar"}
+                            : dashboard.settings.auto_publish_enabled
+                              ? "Aprovar para a fila"
+                              : "Aprovar e publicar"}
                       </button>
                     ) : null}
                     {reel.download_url ? (
@@ -506,22 +667,22 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
           </div>
           <nav className="pagination-bar" aria-label="Paginação da produção recente">
             <span>
-              Vídeos {(reelPage - 1) * REELS_PER_PAGE + 1}–{Math.min(reelPage * REELS_PER_PAGE, reels.length)}
+              Vídeos {(currentReelPage - 1) * REELS_PER_PAGE + 1}–{Math.min(currentReelPage * REELS_PER_PAGE, reels.length)}
               {" "}de {reels.length}
             </span>
             <div>
               <button
                 type="button"
                 onClick={() => setReelPage((current) => Math.max(1, current - 1))}
-                disabled={reelPage === 1}
+                disabled={currentReelPage === 1}
               >
                 Anterior
               </button>
-              <strong>Página {reelPage} de {reelPageCount}</strong>
+              <strong>Página {currentReelPage} de {reelPageCount}</strong>
               <button
                 type="button"
                 onClick={() => setReelPage((current) => Math.min(reelPageCount, current + 1))}
-                disabled={reelPage === reelPageCount}
+                disabled={currentReelPage === reelPageCount}
               >
                 Próxima
               </button>
