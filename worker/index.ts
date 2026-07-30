@@ -1572,6 +1572,17 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
     .map((row) => row.published_at)
     .filter((value): value is string => Boolean(value))
     .sort()[0] || null;
+  const publicationHistory = Array.from(results.reduce((days, row) => {
+    const publishedTimestamp = databaseTimestamp(row.published_at);
+    if (!Number.isFinite(publishedTimestamp)) return days;
+    const publishedDate = analyticsDateKey(new Date(publishedTimestamp));
+    const current = days.get(publishedDate) || { published_date: publishedDate, views: 0, reels: 0 };
+    current.views += Number(row.views || 0);
+    current.reels += 1;
+    days.set(publishedDate, current);
+    return days;
+  }, new Map<string, { published_date: string; views: number; reels: number }>()).values())
+    .sort((left, right) => left.published_date.localeCompare(right.published_date));
   const recommendations: Array<{ title: string; body: string; tone: string }> = [];
 
   if (!successful.length) {
@@ -1643,6 +1654,7 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
       last_error: undefined,
     })),
     history: historyRows.reverse(),
+    publication_history: publicationHistory,
     recommendations,
     youtube: await youtubeAnalyticsPayload(env),
     sync: {

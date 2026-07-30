@@ -80,6 +80,11 @@ type Analytics = {
     shares: number;
     saved: number;
   }>;
+  publication_history: Array<{
+    published_date: string;
+    views: number;
+    reels: number;
+  }>;
   recommendations: Array<{
     title: string;
     body: string;
@@ -297,7 +302,10 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
     { label: "Interações", value: compactNumber.format(analytics.summary.total_interactions), note: "curtidas, comentários, salvos e envios" },
     { label: "Engajamento", value: `${analytics.summary.engagement_rate.toFixed(1).replace(".", ",")}%`, note: "interações ÷ alcance" },
   ] : [];
-  const chartRows = useMemo(() => analytics?.history.slice(-14) ?? [], [analytics?.history]);
+  const chartRows = useMemo(
+    () => analytics?.publication_history.slice(-14) ?? [],
+    [analytics?.publication_history],
+  );
   const chartMax = Math.max(1, ...chartRows.map((row) => row.views));
 
   return (
@@ -482,22 +490,28 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
           <div className="dashboard-section-heading compact">
             <div>
               <span>05 · EVOLUÇÃO INSTAGRAM</span>
-              <h2>Visualizações acumuladas</h2>
+              <h2>Visualizações por dia de publicação</h2>
             </div>
           </div>
           {chartRows.length ? (
-            <div className="history-chart" aria-label="Histórico de visualizações acumuladas">
-              {chartRows.map((row) => (
-                <div className="history-column" key={row.captured_date}>
-                  <span>{compactNumber.format(row.views)}</span>
-                  <i style={{ height: `${Math.max(8, (row.views / chartMax) * 100)}%` }} />
-                  <small>{formatDate(`${row.captured_date}T12:00:00Z`)}</small>
-                </div>
-              ))}
-            </div>
+            <>
+              <div className="history-chart" aria-label="Visualizações agrupadas pela data de publicação">
+                {chartRows.map((row) => (
+                  <div className="history-column" key={row.published_date}>
+                    <span>{compactNumber.format(row.views)}</span>
+                    <i style={{ height: `${Math.max(8, (row.views / chartMax) * 100)}%` }} />
+                    <small>{formatDate(`${row.published_date}T12:00:00Z`)}</small>
+                    <em>{row.reels} {row.reels === 1 ? "Reel" : "Reels"}</em>
+                  </div>
+                ))}
+              </div>
+              <p className="history-note">
+                Cada barra soma as visualizações atuais dos Reels publicados naquele dia.
+              </p>
+            </>
           ) : (
             <div className="history-empty">
-              O histórico diário começará na primeira sincronização e ficará mais útil a cada publicação.
+              As datas aparecerão depois da primeira publicação com Insights disponíveis.
             </div>
           )}
         </div>

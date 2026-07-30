@@ -86,6 +86,7 @@ test("declares the protected intake, dashboard and official multichannel publish
   assert.match(worker, /\/api\/analytics/);
   assert.match(worker, /instagram_business_manage_insights/);
   assert.match(worker, /reel_insight_snapshots/);
+  assert.match(worker, /publication_history: publicationHistory/);
   assert.match(worker, /\"views\", \"reach\", \"likes\", \"comments\", \"saved\", \"shares\"/);
   assert.match(worker, /media_publish/);
   assert.match(worker, /reconcilePublishedReel/);
@@ -118,6 +119,8 @@ test("declares the protected intake, dashboard and official multichannel publish
   assert.match(inbox, /Checks conferidos — publicar/);
   assert.doesNotMatch(inbox, /<option value="auto">/);
   assert.match(analytics, /const REELS_PER_PAGE = 6/);
+  assert.match(analytics, /Visualizações por dia de publicação/);
+  assert.match(analytics, /row\.published_date/);
   assert.match(analytics, /visibleInsightReels\.map/);
   assert.match(analytics, /Últimos 7 dias/);
   assert.match(analytics, /Últimos 30 dias/);

@@ -1508,14 +1508,15 @@ select:focus-visible {
   flex: 1 0 42px;
   height: 250px;
   min-width: 42px;
-  grid-template-rows: 20px minmax(0, 1fr) 26px;
+  grid-template-rows: 20px minmax(0, 1fr) 18px 14px;
   gap: 6px;
   align-items: end;
   justify-items: center;
 }
 
 .history-column span,
-.history-column small {
+.history-column small,
+.history-column em {
   color: var(--muted);
   font-size: 7px;
   font-weight: 620;
@@ -1532,6 +1533,20 @@ select:focus-visible {
 
 .history-column small {
   color: var(--muted-soft);
+}
+
+.history-column em {
+  color: var(--muted-soft);
+  font-size: 6px;
+  font-style: normal;
+  text-transform: uppercase;
+}
+
+.history-note {
+  margin: -8px 22px 20px;
+  color: var(--muted-soft);
+  font-size: 8px;
+  line-height: 1.5;
 }
 
 .insight-table-head,
