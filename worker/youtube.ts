@@ -1275,7 +1275,8 @@ async function retryPublication(request: Request, reelId: number, env: YouTubeEn
     next_attempt_at = CURRENT_TIMESTAMP, lease_token = NULL, lease_expires_at = NULL,
     upload_session_url = NULL, bytes_uploaded = 0, updated_at = CURRENT_TIMESTAMP
     WHERE reel_id = ?`).bind(reelId).run();
-  return json({ accepted: true });
+  const dispatch = await dispatchYouTubeExecutor(env);
+  return json({ accepted: true, dispatch });
 }
 
 async function updateMetadata(request: Request, reelId: number, env: YouTubeEnv, auth: YouTubeRequestAuth) {

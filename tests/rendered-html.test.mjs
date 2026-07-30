@@ -116,7 +116,11 @@ test("declares the protected intake, dashboard and official multichannel publish
   assert.match(inbox, /APROVAÇÃO POR DESTINO/);
   assert.match(inbox, /Publicar também no YouTube/);
   assert.match(inbox, /MP4 pronto/);
-  assert.match(inbox, /Checks conferidos — publicar/);
+  assert.match(inbox, /Publicado no Instagram/);
+  assert.match(inbox, /Envio ainda não iniciado/);
+  assert.match(inbox, /Iniciar envio ao YouTube/);
+  assert.match(inbox, /Publicar Short no YouTube/);
+  assert.match(inbox, /Como acompanhar/);
   assert.doesNotMatch(inbox, /<option value="auto">/);
   assert.match(analytics, /const REELS_PER_PAGE = 6/);
   assert.match(analytics, /Visualizações por dia de publicação/);

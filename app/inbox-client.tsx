@@ -104,21 +104,6 @@ const DOWNLOAD_LABELS: Record<string, string> = {
   failed: "Falhou",
 };
 
-const PUBLISH_LABELS: Record<string, string> = {
-  not_requested: "Publicação disponível",
-  awaiting_download: "Aguardando MP4",
-  awaiting_approval: "Aguardando aprovação",
-  awaiting_setup: "Aguardando conexão",
-  queued: "Publicação na fila",
-  creating: "Criando publicação",
-  processing: "Meta processando",
-  publishing: "Publicando",
-  published: "Publicado",
-  failed: "Falha ao publicar",
-  blocked: "Bloqueado pelo download",
-  awaiting_metadata: "Gerando metadados",
-};
-
 type ApprovalDraft = {
   reel: Reel;
   instagram: boolean;
@@ -131,21 +116,120 @@ type ApprovalDraft = {
   rightsConfirmed: boolean;
 };
 
-const YOUTUBE_LABELS: Record<string, string> = {
-  awaiting_approval: "Aguardando aprovação",
-  awaiting_setup: "Aguardando conexão",
-  queued: "Na fila do YouTube",
-  dispatched: "Executor gratuito acionado",
-  retrying: "Retry programado",
-  preflight: "Validando formato",
-  analyzing: "Analisando conteúdo",
-  uploading: "Enviando privado",
-  processing: "YouTube processando",
-  awaiting_studio_check: "Conferir checks no Studio",
-  published: "Short público",
-  failed: "Falha no YouTube",
-  blocked: "YouTube bloqueado",
+type PlatformProgress = {
+  title: string;
+  detail: string;
+  tone: "waiting" | "active" | "success" | "danger";
 };
+
+function instagramProgress(reel: Reel): PlatformProgress {
+  if (reel.publish_status === "published" || reel.instagram_permalink) {
+    return {
+      title: "Publicado no Instagram",
+      detail: reel.published_at
+        ? `Publicado em ${formatDate(reel.published_at)}.`
+        : "A publicação já está disponível no Instagram.",
+      tone: "success",
+    };
+  }
+  if (reel.publish_status === "awaiting_metadata") {
+    return {
+      title: "Ainda não foi publicado",
+      detail: "A aprovação foi salva, mas o envio não começou. Use “Continuar publicação”.",
+      tone: "waiting",
+    };
+  }
+  if (reel.publish_status === "queued") {
+    return {
+      title: reel.scheduled_for ? "Publicação agendada" : "Na fila do Instagram",
+      detail: reel.scheduled_for
+        ? `Programado para ${formatDate(reel.scheduled_for)}.`
+        : "O envio será iniciado em seguida.",
+      tone: "active",
+    };
+  }
+  if (["creating", "processing", "publishing"].includes(reel.publish_status)) {
+    return {
+      title: "Publicando no Instagram",
+      detail: "A Meta está recebendo e processando o Reel.",
+      tone: "active",
+    };
+  }
+  if (["failed", "blocked"].includes(reel.publish_status)) {
+    return {
+      title: "Instagram precisa de atenção",
+      detail: reel.publish_error || "Confira o erro e tente continuar a publicação.",
+      tone: "danger",
+    };
+  }
+  if (reel.publish_status === "awaiting_setup") {
+    return {
+      title: "Aguardando conexão do Instagram",
+      detail: "Conecte a conta antes de publicar.",
+      tone: "waiting",
+    };
+  }
+  return {
+    title: "Aguardando sua aprovação",
+    detail: "Escolha os destinos e confirme os direitos para publicar.",
+    tone: "waiting",
+  };
+}
+
+function youtubeProgress(reel: Reel, audited: boolean): PlatformProgress {
+  const youtube = reel.youtube;
+  if (youtube?.status === "published") {
+    return {
+      title: "Publicado no YouTube",
+      detail: youtube.published_at
+        ? `Short público desde ${formatDate(youtube.published_at)}.`
+        : "O Short já está público.",
+      tone: "success",
+    };
+  }
+  if (youtube?.status === "awaiting_studio_check" && youtube.video_id) {
+    return {
+      title: "Short privado para revisão",
+      detail: audited
+        ? "Abra o Studio, confira os checks e volte aqui para publicar."
+        : "Abra o Studio para revisar. A publicação pelo ReelVolt aguarda a auditoria da API.",
+      tone: "waiting",
+    };
+  }
+  if (youtube?.status === "queued") {
+    return {
+      title: "Envio ainda não iniciado",
+      detail: "Nenhum vídeo existe no canal ainda. Toque em “Iniciar envio ao YouTube”.",
+      tone: "waiting",
+    };
+  }
+  if (youtube && ["dispatched", "retrying", "preflight", "analyzing", "uploading", "processing"].includes(youtube.status)) {
+    return {
+      title: "Enviando como privado",
+      detail: "O Short aparecerá no YouTube Studio quando o processamento terminar.",
+      tone: "active",
+    };
+  }
+  if (youtube && ["failed", "blocked"].includes(youtube.status)) {
+    return {
+      title: "YouTube precisa de atenção",
+      detail: youtube.error || "Confira o bloqueio e tente novamente.",
+      tone: "danger",
+    };
+  }
+  if (youtube?.status === "awaiting_setup") {
+    return {
+      title: "Aguardando conexão do YouTube",
+      detail: "Conecte o canal para iniciar o upload privado.",
+      tone: "waiting",
+    };
+  }
+  return {
+    title: "Aguardando sua aprovação",
+    detail: "Selecione YouTube e confirme os direitos para preparar o Short privado.",
+    tone: "waiting",
+  };
+}
 
 const EMPTY_DASHBOARD: Dashboard = {
   metrics: {
@@ -421,12 +505,12 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
       if (!response.ok) throw new Error(data.error || "Não foi possível iniciar a publicação.");
       setNotice({
         tone: "success",
-        text: data.awaitingMetadata
-          ? `Reel #${reel.id} aprovado. A análise preventiva prepara Instagram e o upload privado no YouTube.`
-          : data.queued
+        text: data.queued
           ? `Reel #${reel.id} aprovado e programado para ${formatDate(data.scheduledFor || null)}.`
+          : data.youtube?.requested && draft.instagram
+            ? `Reel #${reel.id}: publicação no Instagram iniciada e upload privado do YouTube colocado em andamento.`
           : data.youtube?.requested
-            ? `Publicação do Reel #${reel.id} iniciada; o Short será enviado como privado.`
+            ? `Upload privado do Reel #${reel.id} colocado em andamento no YouTube.`
             : `Publicação do Reel #${reel.id} iniciada.`,
       });
       setApprovalDraft(null);
@@ -452,7 +536,10 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
       });
       const data = await response.json() as { error?: string };
       if (!response.ok) throw new Error(data.error || "Não foi possível reenfileirar o Short.");
-      setNotice({ tone: "success", text: `Short do Reel #${reel.id} reenfileirado sem criar duplicata.` });
+      setNotice({
+        tone: "success",
+        text: `Envio do Reel #${reel.id} ao YouTube iniciado sem criar duplicata.`,
+      });
       await loadData(true);
     } catch (error) {
       setNotice({
@@ -906,6 +993,12 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
             Atualizar
           </button>
         </div>
+        <div className="publishing-guide" aria-label="Como acompanhar cada publicação">
+          <strong>Como acompanhar</strong>
+          <span><b>1.</b> Aprove os destinos.</span>
+          <span><b>2.</b> Veja Instagram e YouTube separadamente.</span>
+          <span><b>3.</b> No YouTube, revise o Short privado antes de publicar.</span>
+        </div>
 
         {loading ? (
           <div className="empty-state">Carregando o estúdio…</div>
@@ -921,11 +1014,20 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
               const canPublish = reel.status === "ready" && (
                 youtubeCanBeAdded
                 || (!instagramAlreadyPublished
-                  && ["not_requested", "awaiting_approval", "awaiting_setup", "failed", "processing", "publishing"].includes(reel.publish_status))
+                  && ["not_requested", "awaiting_approval", "awaiting_setup", "awaiting_metadata", "failed", "processing", "publishing"].includes(reel.publish_status))
               );
               const canApproveAnyDestination = instagramAlreadyPublished
                 ? dashboard.settings.youtube.configured
                 : dashboard.settings.meta_connected || dashboard.settings.youtube.configured;
+              const instagramState = instagramProgress(reel);
+              const youtubeState = youtubeProgress(reel, dashboard.settings.youtube.audited);
+              const youtubeHasDetails = Boolean(
+                reel.youtube?.title
+                || reel.youtube?.description
+                || reel.youtube?.tags.length
+                || reel.youtube?.warning_long_claim
+                || reel.youtube?.error,
+              );
               return (
                 <article className="reel-row" key={reel.id}>
                   {reel.cover_mode === "fixed" ? (
@@ -955,24 +1057,31 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                     </a>
                     <div className="status-line">
                       <span className={`status-badge ${reel.status}`}>{DOWNLOAD_LABELS[reel.status] ?? reel.status}</span>
-                      <span className={`publish-badge ${reel.publish_status}`}>{PUBLISH_LABELS[reel.publish_status] ?? reel.publish_status}</span>
                       <span className="mode-badge">{publicationModeLabel(reel.publication_mode)}</span>
-                      {reel.instagram_selected ? <span className="destination-badge">Instagram</span> : null}
-                      {reel.youtube_selected ? <span className="destination-badge youtube">YouTube</span> : null}
+                    </div>
+                    <div className="platform-progress-grid" aria-label={`Situação de publicação do Reel ${reel.id}`}>
+                      {reel.instagram_selected ? (
+                        <div className={`platform-progress instagram ${instagramState.tone}`}>
+                          <span>Instagram</span>
+                          <strong>{instagramState.title}</strong>
+                          <small>{instagramState.detail}</small>
+                        </div>
+                      ) : null}
+                      {reel.youtube_selected ? (
+                        <div className={`platform-progress youtube ${youtubeState.tone}`}>
+                          <span>YouTube Shorts</span>
+                          <strong>{youtubeState.title}</strong>
+                          <small>{youtubeState.detail}</small>
+                        </div>
+                      ) : null}
                     </div>
                     {reel.scheduled_for ? (
                       <p className="schedule-line">Programado para {formatDate(reel.scheduled_for)}</p>
                     ) : null}
                     {reel.error ? <p className="reel-error">{reel.error}</p> : null}
                     {reel.publish_error ? <p className="reel-error">{reel.publish_error}</p> : null}
-                    {reel.youtube ? (
+                    {reel.youtube && youtubeHasDetails ? (
                       <div className="youtube-status">
-                        <div>
-                          <span className={`publish-badge youtube-${reel.youtube.status}`}>
-                            YouTube · {YOUTUBE_LABELS[reel.youtube.status] ?? reel.youtube.status}
-                          </span>
-                          {reel.youtube.privacy_status ? <small>{reel.youtube.privacy_status}</small> : null}
-                        </div>
                         {reel.youtube.title ? <strong>{reel.youtube.title}</strong> : null}
                         {reel.youtube.description ? <p>{reel.youtube.description}</p> : null}
                         {reel.youtube.tags.length ? <small>{reel.youtube.tags.map((tag) => `#${tag.replace(/^#/, "")}`).join(" ")}</small> : null}
@@ -1005,6 +1114,8 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                             ? "Publicar também no YouTube"
                           : reel.publish_status === "publishing"
                             ? "Atualizar publicação"
+                          : reel.publish_status === "awaiting_metadata"
+                            ? "Continuar publicação"
                           : reel.publish_status === "processing"
                             ? "Continuar publicação"
                             : dashboard.settings.auto_publish_enabled
@@ -1032,19 +1143,22 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                         className="action-primary youtube-release"
                         type="button"
                         onClick={() => void releaseYouTube(reel)}
-                        disabled={publishingId === reel.id}
+                        disabled={publishingId === reel.id || !dashboard.settings.youtube.audited}
+                        title={!dashboard.settings.youtube.audited
+                          ? "A publicação pelo ReelVolt será liberada após a auditoria da API do YouTube"
+                          : undefined}
                       >
-                        Checks conferidos — publicar
+                        Publicar Short no YouTube
                       </button>
                     ) : null}
-                    {reel.youtube && ["failed", "retrying"].includes(reel.youtube.status) && !reel.youtube.video_id ? (
+                    {reel.youtube && ["queued", "failed", "retrying"].includes(reel.youtube.status) && !reel.youtube.video_id ? (
                       <button
-                        className="action-secondary"
+                        className={reel.youtube.status === "queued" ? "action-primary" : "action-secondary"}
                         type="button"
                         onClick={() => void retryYouTube(reel)}
                         disabled={publishingId === reel.id}
                       >
-                        Tentar YouTube novamente
+                        {reel.youtube.status === "queued" ? "Iniciar envio ao YouTube" : "Tentar YouTube novamente"}
                       </button>
                     ) : null}
                     {reel.download_url ? (

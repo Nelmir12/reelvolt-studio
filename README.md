@@ -28,10 +28,12 @@ parte do mecanismo de implantação e rollback.
    Instagram-only. A escolha é confirmada novamente na aprovação e um Reel já
    publicado no Instagram pode usar o mesmo MP4 para entrar depois somente no
    fluxo privado do YouTube, sem republicação no Instagram.
-6. Após a aprovação, um GitHub Action acionado sob demanda valida formato com
-   FFprobe e envia o MP4 inalterado. Não existe polling ocioso nem serviço Render.
-   Sem uma chave paga de IA, o Short recebe metadados provisórios neutros e exige
-   revisão humana explícita no painel.
+6. Após a aprovação, Instagram e YouTube começam em ramos independentes: uma
+   falha ou demora não bloqueia a outra plataforma. O GitHub Action é acionado
+   imediatamente sob demanda, valida o formato com FFprobe e envia o MP4
+   inalterado. Não existe polling ocioso nem serviço Render. Sem uma chave paga
+   de IA, o Short recebe metadados provisórios neutros e exige revisão humana
+   explícita no painel.
 7. A fila automática é opcional. Todo Reel precisa ser aprovado previamente e
    recebe um horário conforme o intervalo configurado; alterar os padrões não
    muda itens já aprovados.
@@ -45,6 +47,11 @@ parte do mecanismo de implantação e rollback.
     snapshots diários e nos marcos de 1h, 24h, 72h e 7 dias. O painel calcula
     visualizações ganhas hoje, ontem, nos últimos 7 dias e nos últimos 30 dias,
     além de preservar as datas de download e publicação por plataforma.
+
+Na Produção, cada Reel exibe cartões separados para Instagram e YouTube com o
+estado real e a próxima ação. O rótulo “privado” só aparece depois que existe um
+vídeo enviado ao YouTube; um item apenas enfileirado informa que ainda não há
+vídeo no canal.
 
 Use somente vídeos próprios, licenciados ou autorizados pelo titular.
 

@@ -210,6 +210,13 @@ mais recente.
 - Exiba separadamente datas de recebimento/download e de publicação por
   plataforma. Resumos de hoje, ontem, 7 dias e 30 dias devem derivar de
   snapshots reais e indicar quando ainda não houver histórico suficiente.
+- Na Produção, use linguagem de usuário final e estados independentes por
+  plataforma. Nunca mostre `private` ou outro valor técnico como se confirmasse
+  um upload que ainda não criou um vídeo externo.
+- A aprovação para Instagram e YouTube deve iniciar os dois ramos em paralelo;
+  metadados ou upload do YouTube não podem bloquear a publicação no Instagram.
+- Em telas mobile, mantenha uma ação principal por próximo passo e empilhe os
+  estados de Instagram e YouTube para leitura sem zoom ou rolagem horizontal.
 
 ## Validação e qualidade
 

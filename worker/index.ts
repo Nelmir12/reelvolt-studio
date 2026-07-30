@@ -1150,6 +1150,9 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
     Boolean(record.rights_confirmed),
     env,
   );
+  if (youtube.status === "queued") {
+    ctx.waitUntil(dispatchYouTubeExecutor(env));
+  }
 
   if (!destinations.instagram) {
     await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
@@ -1159,16 +1162,6 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
       .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, record.id)
       .run();
     return { queued: false, scheduledFor: null, youtube };
-  }
-
-  if (destinations.youtube && youtube.status === "queued") {
-    await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
-      caption_enabled = ?, cover_mode = ?, cover_key = ?, approved_at = CURRENT_TIMESTAMP,
-      scheduled_for = NULL, publish_status = 'awaiting_metadata', publish_error = NULL
-      WHERE id = ?`)
-      .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, record.id)
-      .run();
-    return { queued: true, scheduledFor: null, youtube, awaitingMetadata: true };
   }
 
   if (!metaConnected(env)) {
@@ -1908,6 +1901,9 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
         Boolean(record.rights_confirmed),
         env,
       );
+      if (youtube.status === "queued") {
+        ctx.waitUntil(dispatchYouTubeExecutor(env));
+      }
       await env.DB.prepare(
         "UPDATE reels SET approved_at = COALESCE(approved_at, CURRENT_TIMESTAMP) WHERE id = ?",
       ).bind(record.id).run();
@@ -1926,6 +1922,9 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
         Boolean(record.rights_confirmed),
         env,
       );
+      if (youtube.status === "queued") {
+        ctx.waitUntil(dispatchYouTubeExecutor(env));
+      }
       ctx.waitUntil(publishReel(record, env, baseUrl));
       return json({ accepted: true, id: record.id, queued: false, youtube }, { status: 202 });
     }
