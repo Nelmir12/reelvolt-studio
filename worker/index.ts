@@ -1,10 +1,22 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import {
+  YOUTUBE_SCHEMA_STATEMENTS,
+  createContentTargets,
+  dispatchYouTubeExecutor,
+  handleYouTubeRequest,
+  publicationDestinations,
+  queueYouTubePublication,
+  refreshYouTubeInsights,
+  youtubeAnalyticsPayload,
+  youtubeConnection,
+  youtubeSummaries,
+  type ContentTargetInput,
+  type YouTubeEnv,
+} from "./youtube";
 
-interface Env {
+interface Env extends YouTubeEnv {
   ASSETS: Fetcher;
-  DB: D1Database;
-  VIDEOS: R2Bucket;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -42,6 +54,7 @@ type ReelInput = {
   rightsConfirmed: boolean;
   publicationMode: PublicationMode;
   shareToFeed: boolean;
+  targets: ContentTargetInput;
 };
 
 type QueueResult = {
@@ -64,10 +77,29 @@ type ReelRecord = {
   publication_mode: PublicationMode;
   share_to_feed: number;
   caption: string | null;
+  caption_enabled: number;
+  cover_mode: CoverMode;
+  cover_key: string | null;
+  approved_at: string | null;
+  scheduled_for: string | null;
   publish_status: string;
   instagram_container_id: string | null;
   publish_requested_at: string | null;
   created_at: string;
+};
+
+type CoverMode = "fixed" | "video" | "none";
+
+type StudioSettings = {
+  id: number;
+  caption_enabled: number;
+  default_caption: string;
+  cover_mode: CoverMode;
+  fixed_cover_key: string | null;
+  fixed_cover_content_type: string | null;
+  auto_publish_enabled: number;
+  publish_interval_minutes: number;
+  updated_at: string;
 };
 
 type ReelListRow = ReelRecord & {
@@ -106,11 +138,16 @@ type InstagramInsightResult = {
 type PublishedReelInsightTarget = {
   id: number;
   instagram_media_id: string;
+  published_at: string | null;
 };
 
 const FIXED_CAPTION = "V arrived at #VogueWorld: Hollywood in unmistakable style, enjoying the live performances while showcasing the effortless elegance he's become known for. Another runway-worthy moment. #Taehyung";
 const COVER_PATH = "/reel-cover.jpg";
 const PUBLICATION_MODES = new Set<PublicationMode>(["download_only", "approval", "auto"]);
+const COVER_MODES = new Set<CoverMode>(["fixed", "video", "none"]);
+const DEFAULT_INTERVAL_MINUTES = 60;
+const MIN_INTERVAL_MINUTES = 15;
+const MAX_INTERVAL_MINUTES = 7 * 24 * 60;
 
 const CREATE_REELS = `CREATE TABLE IF NOT EXISTS reels (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,6 +169,11 @@ const CREATE_REELS = `CREATE TABLE IF NOT EXISTS reels (
   publication_mode TEXT NOT NULL DEFAULT 'approval',
   share_to_feed INTEGER NOT NULL DEFAULT 1,
   caption TEXT,
+  caption_enabled INTEGER NOT NULL DEFAULT 1,
+  cover_mode TEXT NOT NULL DEFAULT 'fixed',
+  cover_key TEXT,
+  approved_at TEXT,
+  scheduled_for TEXT,
   publish_status TEXT NOT NULL DEFAULT 'not_requested',
   publish_error TEXT,
   instagram_container_id TEXT,
@@ -147,6 +189,11 @@ const ADDITIONAL_COLUMNS: Record<string, string> = {
   publication_mode: "ALTER TABLE reels ADD COLUMN publication_mode TEXT NOT NULL DEFAULT 'approval'",
   share_to_feed: "ALTER TABLE reels ADD COLUMN share_to_feed INTEGER NOT NULL DEFAULT 1",
   caption: "ALTER TABLE reels ADD COLUMN caption TEXT",
+  caption_enabled: "ALTER TABLE reels ADD COLUMN caption_enabled INTEGER NOT NULL DEFAULT 1",
+  cover_mode: "ALTER TABLE reels ADD COLUMN cover_mode TEXT NOT NULL DEFAULT 'fixed'",
+  cover_key: "ALTER TABLE reels ADD COLUMN cover_key TEXT",
+  approved_at: "ALTER TABLE reels ADD COLUMN approved_at TEXT",
+  scheduled_for: "ALTER TABLE reels ADD COLUMN scheduled_for TEXT",
   publish_status: "ALTER TABLE reels ADD COLUMN publish_status TEXT NOT NULL DEFAULT 'not_requested'",
   publish_error: "ALTER TABLE reels ADD COLUMN publish_error TEXT",
   instagram_container_id: "ALTER TABLE reels ADD COLUMN instagram_container_id TEXT",
@@ -160,6 +207,18 @@ const CREATE_REELS_INDEX = "CREATE INDEX IF NOT EXISTS reels_created_at_idx ON r
 const CREATE_REELS_SOURCE_INDEX = "CREATE INDEX IF NOT EXISTS reels_source_url_idx ON reels (source_url)";
 const CREATE_REELS_PUBLIC_TOKEN_INDEX = "CREATE UNIQUE INDEX IF NOT EXISTS reels_public_token_idx ON reels (public_token)";
 const CREATE_REELS_PUBLISH_INDEX = "CREATE INDEX IF NOT EXISTS reels_publish_status_idx ON reels (publish_status)";
+const CREATE_REELS_SCHEDULE_INDEX = "CREATE INDEX IF NOT EXISTS reels_schedule_idx ON reels (publish_status, scheduled_for)";
+const CREATE_STUDIO_SETTINGS = `CREATE TABLE IF NOT EXISTS studio_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  caption_enabled INTEGER NOT NULL DEFAULT 1,
+  default_caption TEXT NOT NULL DEFAULT '',
+  cover_mode TEXT NOT NULL DEFAULT 'fixed',
+  fixed_cover_key TEXT,
+  fixed_cover_content_type TEXT,
+  auto_publish_enabled INTEGER NOT NULL DEFAULT 0,
+  publish_interval_minutes INTEGER NOT NULL DEFAULT 60,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`;
 const CREATE_AUTHORIZED_SENDERS = `CREATE TABLE IF NOT EXISTS authorized_senders (
   sender_id TEXT PRIMARY KEY,
   paired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -200,6 +259,21 @@ const CREATE_REEL_INSIGHT_SNAPSHOTS = `CREATE TABLE IF NOT EXISTS reel_insight_s
 )`;
 const CREATE_REEL_INSIGHTS_DAY_INDEX = "CREATE UNIQUE INDEX IF NOT EXISTS reel_insight_snapshots_day_idx ON reel_insight_snapshots (reel_id, captured_date)";
 const CREATE_REEL_INSIGHTS_REEL_INDEX = "CREATE INDEX IF NOT EXISTS reel_insight_snapshots_reel_idx ON reel_insight_snapshots (reel_id, captured_at)";
+const REEL_INSIGHT_COLUMNS: Record<string, string> = {
+  follows: "ALTER TABLE reel_insights ADD COLUMN follows INTEGER NOT NULL DEFAULT 0",
+  replays: "ALTER TABLE reel_insights ADD COLUMN replays INTEGER NOT NULL DEFAULT 0",
+  skip_rate_bps: "ALTER TABLE reel_insights ADD COLUMN skip_rate_bps INTEGER NOT NULL DEFAULT 0",
+};
+const REEL_INSIGHT_SNAPSHOT_COLUMNS: Record<string, string> = {
+  follows: "ALTER TABLE reel_insight_snapshots ADD COLUMN follows INTEGER NOT NULL DEFAULT 0",
+  replays: "ALTER TABLE reel_insight_snapshots ADD COLUMN replays INTEGER NOT NULL DEFAULT 0",
+  average_watch_time_ms: "ALTER TABLE reel_insight_snapshots ADD COLUMN average_watch_time_ms INTEGER NOT NULL DEFAULT 0",
+  skip_rate_bps: "ALTER TABLE reel_insight_snapshots ADD COLUMN skip_rate_bps INTEGER NOT NULL DEFAULT 0",
+  milestone: "ALTER TABLE reel_insight_snapshots ADD COLUMN milestone TEXT",
+  captured_minutes: "ALTER TABLE reel_insight_snapshots ADD COLUMN captured_minutes INTEGER",
+};
+const CREATE_REEL_INSIGHTS_MILESTONE_INDEX =
+  "CREATE UNIQUE INDEX IF NOT EXISTS reel_insight_snapshots_milestone_idx ON reel_insight_snapshots (reel_id, milestone)";
 
 function json(data: unknown, init: ResponseInit = {}) {
   const headers = new Headers(init.headers);
@@ -215,12 +289,14 @@ async function ensureDatabase(env: Env) {
     env.DB.prepare(CREATE_REELS_INDEX),
     env.DB.prepare(CREATE_REELS_SOURCE_INDEX),
     env.DB.prepare(CREATE_REELS_PUBLIC_TOKEN_INDEX),
+    env.DB.prepare(CREATE_STUDIO_SETTINGS),
     env.DB.prepare(CREATE_AUTHORIZED_SENDERS),
     env.DB.prepare(CREATE_INSTAGRAM_AUTH),
     env.DB.prepare(CREATE_REEL_INSIGHTS),
     env.DB.prepare(CREATE_REEL_INSIGHT_SNAPSHOTS),
     env.DB.prepare(CREATE_REEL_INSIGHTS_DAY_INDEX),
     env.DB.prepare(CREATE_REEL_INSIGHTS_REEL_INDEX),
+    ...YOUTUBE_SCHEMA_STATEMENTS.map((statement) => env.DB.prepare(statement)),
   ]);
 
   const { results } = await env.DB.prepare("PRAGMA table_info(reels)").all<{ name: string }>();
@@ -228,7 +304,27 @@ async function ensureDatabase(env: Env) {
   for (const [name, statement] of Object.entries(ADDITIONAL_COLUMNS)) {
     if (!existing.has(name)) await env.DB.prepare(statement).run();
   }
-  await env.DB.prepare(CREATE_REELS_PUBLISH_INDEX).run();
+  const insightInfo = await env.DB.prepare("PRAGMA table_info(reel_insights)").all<{ name: string }>();
+  const insightColumns = new Set(insightInfo.results.map((column) => column.name));
+  for (const [name, statement] of Object.entries(REEL_INSIGHT_COLUMNS)) {
+    if (!insightColumns.has(name)) await env.DB.prepare(statement).run();
+  }
+  const snapshotInfo = await env.DB.prepare("PRAGMA table_info(reel_insight_snapshots)").all<{ name: string }>();
+  const snapshotColumns = new Set(snapshotInfo.results.map((column) => column.name));
+  for (const [name, statement] of Object.entries(REEL_INSIGHT_SNAPSHOT_COLUMNS)) {
+    if (!snapshotColumns.has(name)) await env.DB.prepare(statement).run();
+  }
+  await env.DB.batch([
+    env.DB.prepare(CREATE_REELS_PUBLISH_INDEX),
+    env.DB.prepare(CREATE_REELS_SCHEDULE_INDEX),
+    env.DB.prepare(`INSERT OR IGNORE INTO studio_settings
+      (id, caption_enabled, default_caption, cover_mode, auto_publish_enabled, publish_interval_minutes)
+      VALUES (1, 1, ?, 'fixed', 0, ?)`)
+      .bind(FIXED_CAPTION, DEFAULT_INTERVAL_MINUTES),
+    env.DB.prepare(`UPDATE reels SET publish_status = 'awaiting_approval'
+      WHERE status = 'ready' AND publish_status = 'queued' AND approved_at IS NULL`),
+    env.DB.prepare(CREATE_REEL_INSIGHTS_MILESTONE_INDEX),
+  ]);
 }
 
 function configuredInboxEmails(env: Env) {
@@ -293,6 +389,74 @@ function sanitizePublicationMode(value: unknown): PublicationMode {
   return typeof value === "string" && PUBLICATION_MODES.has(value as PublicationMode)
     ? value as PublicationMode
     : "approval";
+}
+
+function sanitizeTargets(
+  destinations: unknown,
+  input: {
+    rightsBasis?: unknown;
+    context?: unknown;
+    madeForKids?: unknown;
+    containsSyntheticMedia?: unknown;
+    paidProductPlacement?: unknown;
+  },
+  defaultDestinations: Array<"instagram" | "youtube">,
+): ContentTargetInput {
+  const requested = Array.isArray(destinations)
+    ? destinations.filter((value): value is "instagram" | "youtube" =>
+      value === "instagram" || value === "youtube")
+    : defaultDestinations;
+  return {
+    instagramEnabled: requested.includes("instagram"),
+    youtubeEnabled: requested.includes("youtube"),
+    rightsBasis: input.rightsBasis === "licensed" ? "licensed" : "owned",
+    context: sanitizeText(input.context, 800),
+    madeForKids: input.madeForKids === true,
+    containsSyntheticMedia: input.containsSyntheticMedia === true,
+    paidProductPlacement: input.paidProductPlacement === true,
+  };
+}
+
+function sanitizeCoverMode(value: unknown): CoverMode {
+  return typeof value === "string" && COVER_MODES.has(value as CoverMode)
+    ? value as CoverMode
+    : "fixed";
+}
+
+function sanitizeInterval(value: unknown) {
+  const parsed = Math.round(Number(value));
+  if (!Number.isFinite(parsed)) return DEFAULT_INTERVAL_MINUTES;
+  return Math.min(MAX_INTERVAL_MINUTES, Math.max(MIN_INTERVAL_MINUTES, parsed));
+}
+
+function sqliteTimestamp(value: number | Date = Date.now()) {
+  const date = value instanceof Date ? value : new Date(value);
+  return date.toISOString().slice(0, 19).replace("T", " ");
+}
+
+async function studioSettings(env: Env) {
+  const row = await env.DB.prepare(`SELECT id, caption_enabled, default_caption, cover_mode,
+    fixed_cover_key, fixed_cover_content_type, auto_publish_enabled, publish_interval_minutes,
+    updated_at FROM studio_settings WHERE id = 1`).first<StudioSettings>();
+  if (!row) throw new Error("As preferências do estúdio não estão disponíveis.");
+  return {
+    ...row,
+    cover_mode: sanitizeCoverMode(row.cover_mode),
+    publish_interval_minutes: sanitizeInterval(row.publish_interval_minutes),
+  };
+}
+
+function settingsPayload(settings: StudioSettings, baseUrl: string) {
+  return {
+    caption_enabled: Boolean(settings.caption_enabled),
+    caption: settings.default_caption,
+    cover_mode: settings.cover_mode,
+    cover_url: settings.fixed_cover_key ? `${baseUrl}/api/studio-settings/cover` : `${baseUrl}${COVER_PATH}`,
+    has_custom_cover: Boolean(settings.fixed_cover_key),
+    auto_publish_enabled: Boolean(settings.auto_publish_enabled),
+    publish_interval_minutes: settings.publish_interval_minutes,
+    updated_at: settings.updated_at,
+  };
 }
 
 function metaConnected(env: Env) {
@@ -440,6 +604,13 @@ async function signedMediaUrl(reelId: number, baseUrl: string, env: Env) {
   const expires = Math.floor(Date.now() / 1000) + 60 * 60 * 2;
   const signature = await mediaSignature(reelId, expires, env.PUBLISH_URL_SECRET);
   return `${baseUrl}/publish-media/${reelId}.mp4?expires=${expires}&signature=${encodeURIComponent(signature)}`;
+}
+
+async function signedCoverUrl(reelId: number, baseUrl: string, env: Env) {
+  if (!env.PUBLISH_URL_SECRET) throw new Error("A assinatura temporária de mídia não está configurada.");
+  const expires = Math.floor(Date.now() / 1000) + 60 * 60 * 2;
+  const signature = await mediaSignature(reelId, expires, env.PUBLISH_URL_SECRET);
+  return `${baseUrl}/publish-cover/${reelId}.jpg?expires=${expires}&signature=${encodeURIComponent(signature)}`;
 }
 
 async function validMediaSignature(reelId: number, url: URL, env: Env) {
@@ -591,6 +762,24 @@ async function saveInsightError(reelId: number, error: unknown, env: Env) {
     .run();
 }
 
+function insightMilestone(publishedAt: string | null) {
+  const timestamp = databaseTimestamp(publishedAt);
+  if (!Number.isFinite(timestamp)) return { milestone: null, capturedMinutes: null };
+  const capturedMinutes = Math.max(0, Math.round((Date.now() - timestamp) / 60_000));
+  const thresholds = [
+    { minutes: 7 * 24 * 60, label: "7d" },
+    { minutes: 72 * 60, label: "72h" },
+    { minutes: 24 * 60, label: "24h" },
+    { minutes: 60, label: "1h" },
+  ];
+  const threshold = thresholds.find((item) =>
+    capturedMinutes >= item.minutes && capturedMinutes < item.minutes + 75);
+  return {
+    milestone: threshold?.label || null,
+    capturedMinutes: threshold ? capturedMinutes : null,
+  };
+}
+
 async function refreshReelInsights(target: PublishedReelInsightTarget, env: Env) {
   try {
     const primary = await mediaInsightRequest(
@@ -626,6 +815,7 @@ async function refreshReelInsights(target: PublishedReelInsightTarget, env: Env)
       averageWatchTimeMs: watch.get("ig_reels_avg_watch_time") || 0,
       totalWatchTimeMs: watch.get("ig_reels_video_view_total_time") || 0,
     };
+    const milestone = insightMilestone(target.published_at);
 
     await env.DB.batch([
       env.DB.prepare(`INSERT INTO reel_insights
@@ -651,11 +841,16 @@ async function refreshReelInsights(target: PublishedReelInsightTarget, env: Env)
           metrics.totalWatchTimeMs,
         ),
       env.DB.prepare(`INSERT INTO reel_insight_snapshots
-        (reel_id, captured_date, views, reach, total_interactions, shares, saved, captured_at)
-        VALUES (?, date('now'), ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        (reel_id, captured_date, views, reach, total_interactions, shares, saved,
+          average_watch_time_ms, milestone, captured_minutes, captured_at)
+        VALUES (?, date('now'), ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(reel_id, captured_date) DO UPDATE SET views = excluded.views,
           reach = excluded.reach, total_interactions = excluded.total_interactions,
-          shares = excluded.shares, saved = excluded.saved, captured_at = CURRENT_TIMESTAMP`)
+          shares = excluded.shares, saved = excluded.saved,
+          average_watch_time_ms = excluded.average_watch_time_ms,
+          milestone = COALESCE(reel_insight_snapshots.milestone, excluded.milestone),
+          captured_minutes = COALESCE(reel_insight_snapshots.captured_minutes, excluded.captured_minutes),
+          captured_at = CURRENT_TIMESTAMP`)
         .bind(
           target.id,
           metrics.views,
@@ -663,6 +858,9 @@ async function refreshReelInsights(target: PublishedReelInsightTarget, env: Env)
           metrics.totalInteractions,
           metrics.shares,
           metrics.saved,
+          metrics.averageWatchTimeMs,
+          milestone.milestone,
+          milestone.capturedMinutes,
         ),
     ]);
     return true;
@@ -673,7 +871,7 @@ async function refreshReelInsights(target: PublishedReelInsightTarget, env: Env)
 }
 
 async function refreshAllInsights(env: Env) {
-  const { results } = await env.DB.prepare(`SELECT id, instagram_media_id FROM reels
+  const { results } = await env.DB.prepare(`SELECT id, instagram_media_id, published_at FROM reels
     WHERE publish_status = 'published' AND instagram_media_id IS NOT NULL
     ORDER BY published_at DESC LIMIT 100`)
     .all<PublishedReelInsightTarget>();
@@ -708,7 +906,7 @@ async function reconcilePublishedReel(record: ReelRecord, env: Env) {
     throw new Error(`${result.error?.message || "Não foi possível consultar as publicações recentes."}${details}`);
   }
 
-  const expectedCaption = (record.caption || FIXED_CAPTION).trim();
+  const expectedCaption = record.caption_enabled ? (record.caption || "").trim() : "";
   const requestedAt = databaseTimestamp(record.publish_requested_at || record.created_at);
   const earliestMatch = Number.isFinite(requestedAt)
     ? requestedAt - 15 * 60 * 1000
@@ -719,7 +917,7 @@ async function reconcilePublishedReel(record: ReelRecord, env: Env) {
       const publishedAt = Date.parse(media.timestamp || "");
       const isVideo = !media.media_type || media.media_type === "VIDEO";
       return isVideo
-        && media.caption?.trim() === expectedCaption
+        && (media.caption || "").trim() === expectedCaption
         && Number.isFinite(publishedAt)
         && publishedAt >= earliestMatch
         && publishedAt <= latestMatch;
@@ -766,17 +964,24 @@ async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
     let containerId = record.instagram_container_id;
     if (!containerId) {
       const videoUrl = await signedMediaUrl(record.id, baseUrl, env);
+      const parameters: Record<string, string> = {
+        media_type: "REELS",
+        video_url: videoUrl,
+        share_to_feed: record.share_to_feed ? "true" : "false",
+      };
+      if (record.caption_enabled && record.caption?.trim()) {
+        parameters.caption = record.caption.trim();
+      }
+      if (record.cover_mode === "fixed") {
+        parameters.cover_url = record.cover_key
+          ? await signedCoverUrl(record.id, baseUrl, env)
+          : `${baseUrl}${COVER_PATH}`;
+      }
       const created = await graphRequest(
         `${env.INSTAGRAM_USER_ID}/media`,
         env,
         "POST",
-        {
-          media_type: "REELS",
-          video_url: videoUrl,
-          cover_url: `${baseUrl}${COVER_PATH}`,
-          caption: record.caption || FIXED_CAPTION,
-          share_to_feed: record.share_to_feed ? "true" : "false",
-        },
+        parameters,
       );
       if (!created.id) throw new Error("A Meta não retornou o identificador da publicação.");
       containerId = created.id;
@@ -844,7 +1049,7 @@ async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
   }
 }
 
-async function processReel(record: ReelRecord, env: Env, baseUrl: string) {
+async function processReel(record: ReelRecord, env: Env) {
   try {
     await env.DB.prepare("UPDATE reels SET status = 'downloading', error = NULL WHERE id = ?")
       .bind(record.id).run();
@@ -866,19 +1071,13 @@ async function processReel(record: ReelRecord, env: Env, baseUrl: string) {
     const stored = await env.VIDEOS.head(storageKey);
     const publishStatus = record.publication_mode === "download_only"
       ? "not_requested"
-      : record.publication_mode === "auto"
-        ? "queued"
-        : "awaiting_approval";
+      : "awaiting_approval";
     await env.DB.prepare(`UPDATE reels
       SET status = 'ready', storage_key = ?, filename = ?, content_type = ?, size_bytes = ?,
         completed_at = CURRENT_TIMESTAMP, error = NULL, publish_status = ?, publish_error = NULL
       WHERE id = ?`)
       .bind(storageKey, `reel-${record.id}.mp4`, "video/mp4", stored?.size ?? null, publishStatus, record.id)
       .run();
-
-    if (record.publication_mode === "auto") {
-      await publishReel({ ...record, storage_key: storageKey, filename: `reel-${record.id}.mp4`, content_type: "video/mp4", status: "ready" }, env, baseUrl);
-    }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Falha desconhecida";
     await env.DB.prepare(`UPDATE reels SET status = 'failed', error = ?,
@@ -891,18 +1090,140 @@ async function processReel(record: ReelRecord, env: Env, baseUrl: string) {
 async function reelById(id: number, env: Env) {
   return env.DB.prepare(`SELECT id, source_url, rules, source_account, rights_confirmed, public_token,
     storage_key, filename, content_type, status, publication_mode, share_to_feed, caption,
+    caption_enabled, cover_mode, cover_key, approved_at, scheduled_for,
     publish_status, instagram_container_id, publish_requested_at, created_at
     FROM reels WHERE id = ?`).bind(id).first<ReelRecord>();
+}
+
+async function nextPublicationTime(env: Env, intervalMinutes: number) {
+  const row = await env.DB.prepare(`SELECT
+    (SELECT MAX(scheduled_for) FROM reels WHERE publish_status = 'queued') AS last_scheduled,
+    (SELECT MAX(published_at) FROM reels WHERE publish_status = 'published') AS last_published`)
+    .first<{ last_scheduled: string | null; last_published: string | null }>();
+  const intervalMs = intervalMinutes * 60 * 1000;
+  const candidates = [
+    databaseTimestamp(row?.last_scheduled || null),
+    databaseTimestamp(row?.last_published || null),
+  ].filter(Number.isFinite);
+  const latest = candidates.length ? Math.max(...candidates) : Number.NaN;
+  return sqliteTimestamp(Number.isFinite(latest) ? Math.max(Date.now(), latest + intervalMs) : Date.now());
+}
+
+async function reschedulePublicationQueue(env: Env, intervalMinutes: number) {
+  const { results } = await env.DB.prepare(`SELECT id FROM reels
+    WHERE status = 'ready' AND publish_status = 'queued' AND approved_at IS NOT NULL
+    ORDER BY datetime(COALESCE(scheduled_for, approved_at, created_at)), id`).all<{ id: number }>();
+  if (!results.length) return;
+  const last = await env.DB.prepare(
+    "SELECT MAX(published_at) AS last_published FROM reels WHERE publish_status = 'published'",
+  ).first<{ last_published: string | null }>();
+  const lastPublished = databaseTimestamp(last?.last_published || null);
+  const intervalMs = intervalMinutes * 60 * 1000;
+  let cursor = Number.isFinite(lastPublished)
+    ? Math.max(Date.now(), lastPublished + intervalMs)
+    : Date.now();
+  await env.DB.batch(results.map((row) => {
+    const statement = env.DB.prepare(
+      "UPDATE reels SET scheduled_for = ? WHERE id = ? AND publish_status = 'queued'",
+    ).bind(sqliteTimestamp(cursor), row.id);
+    cursor += intervalMs;
+    return statement;
+  }));
+}
+
+async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: ExecutionContext) {
+  const settings = await studioSettings(env);
+  const caption = settings.caption_enabled ? settings.default_caption.trim() : "";
+  const coverKey = settings.cover_mode === "fixed" ? settings.fixed_cover_key : null;
+  const destinations = await publicationDestinations(record.id, env);
+  const youtube = await queueYouTubePublication(
+    record.id,
+    record.source_account,
+    Boolean(record.rights_confirmed),
+    env,
+  );
+
+  if (!destinations.instagram) {
+    await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
+      caption_enabled = ?, cover_mode = ?, cover_key = ?, approved_at = CURRENT_TIMESTAMP,
+      scheduled_for = NULL, publish_status = 'not_requested', publish_error = NULL
+      WHERE id = ?`)
+      .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, record.id)
+      .run();
+    return { queued: false, scheduledFor: null, youtube };
+  }
+
+  if (destinations.youtube && youtube.status === "queued") {
+    await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
+      caption_enabled = ?, cover_mode = ?, cover_key = ?, approved_at = CURRENT_TIMESTAMP,
+      scheduled_for = NULL, publish_status = 'awaiting_metadata', publish_error = NULL
+      WHERE id = ?`)
+      .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, record.id)
+      .run();
+    return { queued: true, scheduledFor: null, youtube, awaitingMetadata: true };
+  }
+
+  if (!metaConnected(env)) {
+    await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
+      caption_enabled = ?, cover_mode = ?, cover_key = ?, approved_at = CURRENT_TIMESTAMP,
+      scheduled_for = NULL, publish_status = 'awaiting_setup',
+      publish_error = 'Conecte a conta do Instagram para publicar este Reel.'
+      WHERE id = ?`)
+      .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, record.id)
+      .run();
+    return { queued: false, scheduledFor: null, youtube };
+  }
+
+  if (settings.auto_publish_enabled) {
+    const scheduledFor = await nextPublicationTime(env, settings.publish_interval_minutes);
+    await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
+      caption_enabled = ?, cover_mode = ?, cover_key = ?, approved_at = CURRENT_TIMESTAMP,
+      scheduled_for = ?, publish_status = 'queued', publish_error = NULL,
+      instagram_container_id = NULL, publish_requested_at = NULL
+      WHERE id = ?`)
+      .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, scheduledFor, record.id)
+      .run();
+    return { queued: true, scheduledFor, youtube };
+  }
+
+  await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
+    caption_enabled = ?, cover_mode = ?, cover_key = ?, approved_at = CURRENT_TIMESTAMP,
+    scheduled_for = NULL, publish_status = 'queued', publish_error = NULL,
+    instagram_container_id = NULL, publish_requested_at = NULL
+    WHERE id = ?`)
+    .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, record.id)
+    .run();
+  const approved = await reelById(record.id, env);
+  if (!approved) throw new Error("O Reel aprovado não pôde ser recarregado.");
+  ctx.waitUntil(publishReel(approved, env, baseUrl));
+  return { queued: false, scheduledFor: null, youtube };
+}
+
+async function processPublicationQueue(env: Env, baseUrl: string) {
+  if (!metaConnected(env)) return { processed: false };
+  const due = await env.DB.prepare(`SELECT id FROM reels
+    WHERE status = 'ready' AND publish_status = 'queued'
+      AND approved_at IS NOT NULL AND scheduled_for IS NOT NULL
+      AND datetime(scheduled_for) <= CURRENT_TIMESTAMP
+    ORDER BY datetime(scheduled_for), id LIMIT 1`).first<{ id: number }>();
+  if (!due) return { processed: false };
+  const claim = await env.DB.prepare(`UPDATE reels SET publish_status = 'publishing',
+    publish_requested_at = COALESCE(publish_requested_at, CURRENT_TIMESTAMP)
+    WHERE id = ? AND publish_status = 'queued'`).bind(due.id).run();
+  if (!claim.meta.changes) return { processed: false };
+  const record = await reelById(due.id, env);
+  if (!record) return { processed: false };
+  await publishReel(record, env, baseUrl);
+  return { processed: true, id: due.id };
 }
 
 async function queueReel(
   input: ReelInput,
   env: Env,
   ctx: ExecutionContext,
-  baseUrl: string,
 ): Promise<QueueResult> {
   const existing = await env.DB.prepare(
-    "SELECT id FROM reels WHERE source_url = ? AND status IN ('queued', 'downloading', 'ready') ORDER BY id DESC LIMIT 1",
+    "SELECT id FROM reels WHERE source_url = ? AND status <> 'failed' ORDER BY id DESC LIMIT 1",
   ).bind(input.sourceUrl).first<{ id: number }>();
   if (existing) return { accepted: false, reason: "duplicate", id: existing.id };
 
@@ -930,11 +1251,13 @@ async function queueReel(
 
   const record = await env.DB.prepare(`SELECT id, source_url, rules, source_account, rights_confirmed,
     public_token, storage_key, filename, content_type, status, publication_mode, share_to_feed,
-    caption, publish_status, instagram_container_id, publish_requested_at, created_at
+    caption, caption_enabled, cover_mode, cover_key, approved_at, scheduled_for,
+    publish_status, instagram_container_id, publish_requested_at, created_at
     FROM reels WHERE message_id = ?`)
     .bind(input.messageId).first<ReelRecord>();
   if (!record) return { accepted: false, reason: "database_error" };
-  ctx.waitUntil(processReel(record, env, baseUrl));
+  await createContentTargets(record.id, input.targets, env);
+  ctx.waitUntil(processReel(record, env));
   return { accepted: true, id: record.id };
 }
 
@@ -960,13 +1283,34 @@ async function serveVideo(
   return new Response(options.method === "HEAD" ? null : object.body, { headers });
 }
 
+async function serveCover(
+  row: { cover_key: string | null; content_type: string | null } | null,
+  env: Env,
+  method = "GET",
+  isPublic = false,
+) {
+  if (!row?.cover_key) return json({ error: "Capa não encontrada." }, { status: 404 });
+  const object = await env.VIDEOS.get(row.cover_key);
+  if (!object?.body) return json({ error: "Arquivo da capa não encontrado." }, { status: 404 });
+  return new Response(method === "HEAD" ? null : object.body, {
+    headers: {
+      "content-type": row.content_type || "image/jpeg",
+      "content-length": String(object.size),
+      "cache-control": isPublic ? "public, max-age=300" : "private, no-store",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
 async function listReels(env: Env, baseUrl: string) {
   const { results } = await env.DB.prepare(`SELECT id, source_url, rules, source_account,
     rights_confirmed, public_token, storage_key, filename, content_type, size_bytes, status, error,
-    publication_mode, share_to_feed, caption, publish_status, publish_error,
+    publication_mode, share_to_feed, caption, caption_enabled, cover_mode, cover_key,
+    approved_at, scheduled_for, publish_status, publish_error,
     instagram_container_id, instagram_media_id, instagram_permalink, publish_requested_at,
     published_at, created_at, completed_at
     FROM reels WHERE status <> 'failed' ORDER BY id DESC LIMIT 80`).all<ReelListRow>();
+  const summaries = await youtubeSummaries(results.map((row) => row.id), env);
   return results.map((row) => ({
     ...row,
     download_url: row.status === "ready" && row.public_token
@@ -974,6 +1318,7 @@ async function listReels(env: Env, baseUrl: string) {
       : null,
     public_token: undefined,
     storage_key: undefined,
+    youtube: summaries.get(row.id) || null,
   }));
 }
 
@@ -989,6 +1334,14 @@ async function dashboard(env: Env, baseUrl: string) {
     COALESCE(SUM(size_bytes), 0) AS stored_bytes,
     SUM(CASE WHEN date(created_at) >= date('now', '-6 days') THEN 1 ELSE 0 END) AS last_seven_days
     FROM reels`).first<Record<string, number | null>>();
+  const preferences = await studioSettings(env);
+  const youtubeMetrics = await env.DB.prepare(`SELECT
+    SUM(CASE WHEN status IN ('queued', 'leased', 'analyzing', 'uploading', 'processing') THEN 1 ELSE 0 END) AS processing,
+    SUM(CASE WHEN status = 'awaiting_studio_check' THEN 1 ELSE 0 END) AS awaiting_checks,
+    SUM(CASE WHEN status = 'published' THEN 1 ELSE 0 END) AS published,
+    SUM(CASE WHEN status IN ('failed', 'blocked') THEN 1 ELSE 0 END) AS failed
+    FROM youtube_publications`).first<Record<string, number | null>>();
+  const youtube = await youtubeConnection(env);
   return {
     metrics: {
       total: Number(row?.total || 0),
@@ -999,13 +1352,17 @@ async function dashboard(env: Env, baseUrl: string) {
       failed: Number(row?.download_failed || 0) + Number(row?.publish_failed || 0),
       stored_bytes: Number(row?.stored_bytes || 0),
       last_seven_days: Number(row?.last_seven_days || 0),
+      youtube_processing: Number(youtubeMetrics?.processing || 0),
+      youtube_awaiting_checks: Number(youtubeMetrics?.awaiting_checks || 0),
+      youtube_published: Number(youtubeMetrics?.published || 0),
+      youtube_failed: Number(youtubeMetrics?.failed || 0),
     },
     settings: {
       meta_connected: metaConnected(env),
       resolver_connected: Boolean(env.REEL_RESOLVER_URL),
-      cover_url: `${baseUrl}${COVER_PATH}`,
-      caption: FIXED_CAPTION,
+      ...settingsPayload(preferences, baseUrl),
       account: "@btsupply_",
+      youtube,
     },
   };
 }
@@ -1098,6 +1455,12 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
       body: "Autorize a leitura de métricas da conta para transformar publicações em decisões baseadas em visualizações reais.",
       tone: "setup",
     });
+  } else if (results.length < 5) {
+    recommendations.push({
+      title: "Amostra ainda pequena",
+      body: "As recomendações comparativas serão liberadas após cinco publicações no mesmo padrão, com métricas suficientes nos mesmos marcos.",
+      tone: "context",
+    });
   } else {
     const top = results[0];
     if (top && totals.views > 0 && top.views / totals.views >= 0.4) {
@@ -1127,13 +1490,6 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
         tone: "action",
       });
     }
-    if (results.length < 5) {
-      recommendations.push({
-        title: "Amostra ainda pequena",
-        body: "Evite conclusões definitivas. Publique pelo menos cinco Reels no mesmo padrão e compare visualizações nas primeiras 24 e 72 horas.",
-        tone: "context",
-      });
-    }
   }
 
   return {
@@ -1161,6 +1517,7 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
     })),
     history: historyRows.reverse(),
     recommendations,
+    youtube: await youtubeAnalyticsPayload(env),
     sync: {
       status: permissionRequired
         ? "permission_required"
@@ -1184,10 +1541,19 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
   const url = new URL(request.url);
   const isPublicDownload = /^\/download\/[0-9a-f-]{36}$/i.test(url.pathname);
   const publishMediaMatch = url.pathname.match(/^\/publish-media\/(\d+)\.mp4$/);
-  if (!url.pathname.startsWith("/api/") && !isPublicDownload && !publishMediaMatch) return null;
+  const publishCoverMatch = url.pathname.match(/^\/publish-cover\/(\d+)\.jpg$/);
+  const workerMediaRoute = /^\/worker-media\/\d+\.mp4$/.test(url.pathname);
+  if (!url.pathname.startsWith("/api/") && !isPublicDownload && !publishMediaMatch
+    && !publishCoverMatch && !workerMediaRoute) return null;
 
   await ensureDatabase(env);
   const baseUrl = publicBaseUrl(request.url, env);
+  const youtubeResponse = await handleYouTubeRequest(request, env, {
+    userEmail: authenticatedEmail(request),
+    validUser: validInboxUser(request, env),
+    validOrigin: validWriteOrigin(request),
+  });
+  if (youtubeResponse) return youtubeResponse;
 
   if (publishMediaMatch && (request.method === "GET" || request.method === "HEAD")) {
     const reelId = Number(publishMediaMatch[1]);
@@ -1200,6 +1566,22 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     return serveVideo(row, env, { attachment: false, method: request.method });
   }
 
+  if (publishCoverMatch && (request.method === "GET" || request.method === "HEAD")) {
+    const reelId = Number(publishCoverMatch[1]);
+    if (!await validMediaSignature(reelId, url, env)) {
+      return json({ error: "Link de capa inválido ou expirado." }, { status: 403 });
+    }
+    const row = await env.DB.prepare(
+      "SELECT cover_key FROM reels WHERE id = ? AND cover_mode = 'fixed'",
+    ).bind(reelId).first<{ cover_key: string | null }>();
+    const contentType = row?.cover_key?.endsWith(".png")
+      ? "image/png"
+      : row?.cover_key?.endsWith(".webp")
+        ? "image/webp"
+        : "image/jpeg";
+    return serveCover(row ? { ...row, content_type: contentType } : null, env, request.method, true);
+  }
+
   if (url.pathname === "/api/reels" && request.method === "GET") {
     if (!validInboxUser(request, env) && !validAdmin(request, env)) {
       return json({ error: "Não autorizado." }, { status: 401 });
@@ -1209,7 +1591,71 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
 
   if (url.pathname === "/api/dashboard" && request.method === "GET") {
     if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (env.PUBLIC_BASE_URL) ctx.waitUntil(processPublicationQueue(env, baseUrl));
     return json(await dashboard(env, baseUrl));
+  }
+
+  if (url.pathname === "/api/studio-settings" && request.method === "PUT") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    const data = await request.json() as {
+      captionEnabled?: boolean;
+      caption?: string;
+      coverMode?: string;
+      autoPublishEnabled?: boolean;
+      publishIntervalMinutes?: number;
+    };
+    const caption = typeof data.caption === "string" ? data.caption.trim().slice(0, 2200) : "";
+    const coverMode = sanitizeCoverMode(data.coverMode);
+    const interval = sanitizeInterval(data.publishIntervalMinutes);
+    const previous = await studioSettings(env);
+    const autoPublishEnabled = data.autoPublishEnabled === true;
+    await env.DB.prepare(`UPDATE studio_settings SET caption_enabled = ?, default_caption = ?,
+      cover_mode = ?, auto_publish_enabled = ?, publish_interval_minutes = ?,
+      updated_at = CURRENT_TIMESTAMP WHERE id = 1`)
+      .bind(data.captionEnabled === false ? 0 : 1, caption, coverMode,
+        autoPublishEnabled ? 1 : 0, interval)
+      .run();
+    if (autoPublishEnabled && (
+      !previous.auto_publish_enabled || previous.publish_interval_minutes !== interval
+    )) {
+      await reschedulePublicationQueue(env, interval);
+    }
+    return json({ settings: settingsPayload(await studioSettings(env), baseUrl) });
+  }
+
+  if (url.pathname === "/api/studio-settings/cover" && request.method === "GET") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    const settings = await studioSettings(env);
+    return serveCover({
+      cover_key: settings.fixed_cover_key,
+      content_type: settings.fixed_cover_content_type,
+    }, env);
+  }
+
+  if (url.pathname === "/api/studio-settings/cover" && request.method === "POST") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    const form = await request.formData();
+    const file = form.get("cover");
+    if (!(file instanceof File)) return json({ error: "Selecione uma imagem para a capa." }, { status: 400 });
+    const allowedTypes = new Map([
+      ["image/jpeg", "jpg"],
+      ["image/png", "png"],
+      ["image/webp", "webp"],
+    ]);
+    const extension = allowedTypes.get(file.type);
+    if (!extension) return json({ error: "Use uma imagem JPG, PNG ou WebP." }, { status: 415 });
+    if (file.size > 8 * 1024 * 1024) return json({ error: "A capa deve ter no máximo 8 MB." }, { status: 413 });
+    const key = `studio/covers/${crypto.randomUUID()}.${extension}`;
+    await env.VIDEOS.put(key, await file.arrayBuffer(), {
+      httpMetadata: { contentType: file.type },
+      customMetadata: { uploadedBy: authenticatedEmail(request), originalName: file.name.slice(0, 160) },
+    });
+    await env.DB.prepare(`UPDATE studio_settings SET fixed_cover_key = ?,
+      fixed_cover_content_type = ?, cover_mode = 'fixed', updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1`).bind(key, file.type).run();
+    return json({ settings: settingsPayload(await studioSettings(env), baseUrl) }, { status: 201 });
   }
 
   if (url.pathname === "/api/analytics" && request.method === "GET") {
@@ -1230,10 +1676,14 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
   if (url.pathname === "/api/analytics/refresh" && request.method === "POST") {
     if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
     if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
-    if (!metaConnected(env)) {
-      return json({ error: "A conta @btsupply_ ainda precisa ser conectada à Meta." }, { status: 503 });
+    const connection = await youtubeConnection(env);
+    if (!metaConnected(env) && !connection.connected) {
+      return json({ error: "Conecte o Instagram ou o YouTube antes de atualizar métricas." }, { status: 503 });
     }
-    ctx.waitUntil(refreshAllInsights(env));
+    ctx.waitUntil(Promise.allSettled([
+      ...(metaConnected(env) ? [refreshAllInsights(env)] : []),
+      ...(connection.connected ? [refreshYouTubeInsights(env)] : []),
+    ]));
     return json({ accepted: true }, { status: 202 });
   }
 
@@ -1247,6 +1697,12 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       rightsConfirmed?: boolean;
       publicationMode?: string;
       shareToFeed?: boolean;
+      destinations?: Array<"instagram" | "youtube">;
+      rightsBasis?: "owned" | "licensed";
+      context?: string;
+      madeForKids?: boolean;
+      containsSyntheticMedia?: boolean;
+      paidProductPlacement?: boolean;
     };
     const sourceUrl = findInstagramUrl(data?.url);
     if (!sourceUrl) return json({ error: "Informe uma URL válida de Reel público." }, { status: 400 });
@@ -1263,7 +1719,8 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       rightsConfirmed: true,
       publicationMode: sanitizePublicationMode(data.publicationMode),
       shareToFeed: data.shareToFeed !== false,
-    }, env, ctx, baseUrl);
+      targets: sanitizeTargets(data.destinations, data, ["instagram"]),
+    }, env, ctx);
     return json(result, {
       status: result.accepted ? 202 : result.reason === "duplicate" ? 200 : 400,
     });
@@ -1273,15 +1730,28 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
   if (publishMatch && request.method === "POST") {
     if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
     if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
-    if (!metaConnected(env)) {
-      return json({ error: "A conta @btsupply_ ainda precisa ser conectada à Meta." }, { status: 503 });
-    }
     const record = await reelById(Number(publishMatch[1]), env);
     if (!record) return json({ error: "Reel não encontrado." }, { status: 404 });
     if (record.status !== "ready") return json({ error: "O MP4 ainda não está pronto." }, { status: 409 });
     if (record.publish_status === "published") return json({ error: "Este Reel já foi publicado." }, { status: 409 });
-    ctx.waitUntil(publishReel(record, env, baseUrl));
-    return json({ accepted: true, id: record.id }, { status: 202 });
+    if (["creating", "processing", "publishing"].includes(record.publish_status)) {
+      const youtube = await queueYouTubePublication(
+        record.id,
+        record.source_account,
+        Boolean(record.rights_confirmed),
+        env,
+      );
+      ctx.waitUntil(publishReel(record, env, baseUrl));
+      return json({ accepted: true, id: record.id, queued: false, youtube }, { status: 202 });
+    }
+    const result = await approveReel(record, env, baseUrl, ctx);
+    return json({ accepted: true, id: record.id, ...result }, { status: 202 });
+  }
+
+  if (url.pathname === "/api/publication-queue/process" && request.method === "POST") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    return json(await processPublicationQueue(env, baseUrl));
   }
 
   if (url.pathname === "/api/inbox/status" && request.method === "GET") {
@@ -1289,6 +1759,7 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     return json({
       user: authenticatedEmail(request),
       instagram: metaConnected(env),
+      youtube: await youtubeConnection(env),
       resolver: Boolean(env.REEL_RESOLVER_URL),
       storage: true,
     });
@@ -1303,6 +1774,7 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
         userId: Boolean(env.INSTAGRAM_USER_ID),
         apiVersion: env.INSTAGRAM_API_VERSION || null,
       },
+      youtube: await youtubeConnection(env),
       resolver: Boolean(env.REEL_RESOLVER_URL),
       storage: true,
     });
@@ -1316,6 +1788,12 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       sourceAccount?: string;
       publicationMode?: string;
       shareToFeed?: boolean;
+      destinations?: Array<"instagram" | "youtube">;
+      rightsBasis?: "owned" | "licensed";
+      context?: string;
+      madeForKids?: boolean;
+      containsSyntheticMedia?: boolean;
+      paidProductPlacement?: boolean;
     };
     const sourceUrl = findInstagramUrl(data?.url);
     if (!sourceUrl) return json({ error: "Informe uma URL válida de Reel público." }, { status: 400 });
@@ -1328,7 +1806,8 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       rightsConfirmed: true,
       publicationMode: sanitizePublicationMode(data.publicationMode),
       shareToFeed: data.shareToFeed !== false,
-    }, env, ctx, baseUrl);
+      targets: sanitizeTargets(data.destinations, data, ["instagram"]),
+    }, env, ctx);
     return json(result, { status: result.accepted ? 202 : result.reason === "duplicate" ? 200 : 400 });
   }
 
@@ -1369,6 +1848,19 @@ const worker = {
     }
     const apiResponse = await api(request, env, ctx);
     return apiResponse ?? handler.fetch(request, env, ctx);
+  },
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    await ensureDatabase(env);
+    if (!env.PUBLIC_BASE_URL) return;
+    ctx.waitUntil(processPublicationQueue(env, env.PUBLIC_BASE_URL.replace(/\/+$/, "")));
+    ctx.waitUntil(dispatchYouTubeExecutor(env));
+    if (new Date(controller.scheduledTime).getUTCMinutes() === 5) {
+      const connection = await youtubeConnection(env);
+      ctx.waitUntil(Promise.allSettled([
+        ...(metaConnected(env) ? [refreshAllInsights(env)] : []),
+        ...(connection.connected ? [refreshYouTubeInsights(env)] : []),
+      ]));
+    }
   },
 };
 

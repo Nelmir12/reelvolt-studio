@@ -1,5 +1,5 @@
 declare module "cloudflare:workers" {
-  export const env: unknown;
+  export const env: { DB?: D1Database };
 }
 
 type Fetcher = {
@@ -25,6 +25,13 @@ type R2ObjectBody = {
 
 type R2Bucket = {
   put(key: string, value: ReadableStream | ArrayBuffer | string | null, options?: unknown): Promise<unknown>;
-  get(key: string): Promise<R2ObjectBody | null>;
+  get(key: string, options?: { range?: { offset: number; length: number } }): Promise<R2ObjectBody | null>;
   head(key: string): Promise<{ size: number } | null>;
+  delete(key: string): Promise<void>;
+};
+
+type ScheduledController = {
+  scheduledTime: number;
+  cron: string;
+  noRetry(): void;
 };
