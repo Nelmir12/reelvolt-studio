@@ -3,6 +3,7 @@ import handler from "vinext/server/app-router-entry";
 import {
   YOUTUBE_SCHEMA_STATEMENTS,
   createContentTargets,
+  dispatchYouTubeExecutor,
   handleYouTubeRequest,
   publicationDestinations,
   queueYouTubePublication,
@@ -1852,6 +1853,7 @@ const worker = {
     await ensureDatabase(env);
     if (!env.PUBLIC_BASE_URL) return;
     ctx.waitUntil(processPublicationQueue(env, env.PUBLIC_BASE_URL.replace(/\/+$/, "")));
+    ctx.waitUntil(dispatchYouTubeExecutor(env));
     if (new Date(controller.scheduledTime).getUTCMinutes() === 5) {
       const connection = await youtubeConnection(env);
       ctx.waitUntil(Promise.allSettled([

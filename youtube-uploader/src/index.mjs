@@ -10,6 +10,8 @@ const baseUrl = (process.env.REELVOLT_BASE_URL || "").replace(/\/+$/, "");
 const workerSecret = process.env.YOUTUBE_WORKER_SECRET || "";
 const pollIntervalMs = Math.max(2_000, Number(process.env.POLL_INTERVAL_MS || 10_000));
 const port = Number(process.env.PORT || 10_000);
+const runOnce = /^(1|true|yes)$/i.test(process.env.RUN_ONCE || "");
+const analysisMode = (process.env.YOUTUBE_ANALYSIS_MODE || "manual").toLowerCase();
 const uploadChunkBytes = 16 * 1024 * 1024;
 let shuttingDown = false;
 let activeJob = null;
@@ -395,7 +397,9 @@ async function processJob(job) {
       return;
     }
     await heartbeat(job, "analyzing");
-    const evidence = await extractEvidence(videoPath, directory, probe);
+    const evidence = analysisMode === "openai"
+      ? await extractEvidence(videoPath, directory, probe)
+      : { frames: [], audioPath: null };
     const analysis = await analyze(job, evidence, await fileSha256(videoPath));
     if (analysis?.blocked) return;
     if (!job.accessToken) {
@@ -460,32 +464,53 @@ async function pollingLoop() {
   }
 }
 
-const server = createServer((request, response) => {
-  if (request.url === "/health") {
-    response.writeHead(lastError ? 200 : 200, { "content-type": "application/json" });
-    response.end(JSON.stringify({
-      ok: Boolean(baseUrl && workerSecret),
-      activeJob,
-      shuttingDown,
-      lastError,
-    }));
+async function runSingleJob() {
+  if (!baseUrl || !workerSecret) {
+    throw new Error("Configure REELVOLT_BASE_URL e YOUTUBE_WORKER_SECRET.");
+  }
+  const payload = await claim();
+  if (!payload?.job) {
+    console.log("Nenhum Short aguardando processamento.");
     return;
   }
-  response.writeHead(404);
-  response.end();
-});
-
-server.listen(port, "0.0.0.0", () => {
-  console.log(`ReelVolt YouTube executor ouvindo na porta ${port}.`);
-});
-
-function shutdown(signal) {
-  console.log(`Recebido ${signal}; encerrando após o job atual.`);
-  shuttingDown = true;
-  server.close();
+  activeJob = payload.job.id;
+  try {
+    await processJob(payload.job);
+  } catch (error) {
+    console.error(`Job ${payload.job.id}:`, error);
+    await failJob(payload.job, error, true);
+    throw error;
+  } finally {
+    activeJob = null;
+  }
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
-
-await pollingLoop();
+if (runOnce) {
+  await runSingleJob();
+} else {
+  const server = createServer((request, response) => {
+    if (request.url === "/health") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        ok: Boolean(baseUrl && workerSecret),
+        activeJob,
+        shuttingDown,
+        lastError,
+      }));
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  server.listen(port, "0.0.0.0", () => {
+    console.log(`ReelVolt YouTube executor ouvindo na porta ${port}.`);
+  });
+  function shutdown(signal) {
+    console.log(`Recebido ${signal}; encerrando após o job atual.`);
+    shuttingDown = true;
+    server.close();
+  }
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  await pollingLoop();
+}

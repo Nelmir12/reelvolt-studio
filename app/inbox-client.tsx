@@ -114,6 +114,7 @@ const YOUTUBE_LABELS: Record<string, string> = {
   awaiting_approval: "Aguardando aprovação",
   awaiting_setup: "Aguardando conexão",
   queued: "Na fila do YouTube",
+  dispatched: "Executor gratuito acionado",
   retrying: "Retry programado",
   preflight: "Validando formato",
   analyzing: "Analisando conteúdo",
@@ -426,6 +427,54 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
       setNotice({
         tone: "error",
         text: error instanceof Error ? error.message : "Não foi possível tornar o Short público.",
+      });
+    } finally {
+      setPublishingId(null);
+    }
+  }
+
+  async function reviewYouTube(reel: Reel) {
+    const title = window.prompt("Título do Short em inglês (até 100 caracteres):", reel.youtube?.title || "");
+    if (title == null) return;
+    const description = window.prompt(
+      "Descrição curta em inglês. Use somente fatos visíveis ou confirmados:",
+      reel.youtube?.description || "",
+    );
+    if (description == null) return;
+    const tagText = window.prompt(
+      "Até três hashtags, separadas por vírgula:",
+      reel.youtube?.tags.join(", ") || "Shorts",
+    );
+    if (tagText == null) return;
+    const confirmed = window.confirm(
+      "Confirmo que assisti ao vídeo completo, possuo os direitos e que título, descrição e hashtags descrevem somente o conteúdo real.",
+    );
+    if (!confirmed) return;
+    setNotice(null);
+    setPublishingId(reel.id);
+    try {
+      const response = await fetch(`/api/reels/${reel.id}/youtube/metadata`, {
+        method: "PATCH",
+        credentials: "same-origin",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({
+          title,
+          description,
+          tags: tagText.split(",").map((tag) => tag.trim().replace(/^#/, "")).filter(Boolean).slice(0, 3),
+          manualReviewConfirmed: true,
+        }),
+      });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error || "Não foi possível confirmar a revisão.");
+      setNotice({
+        tone: "success",
+        text: `Revisão do Short #${reel.id} confirmada. Ele continua privado até os checks do Studio.`,
+      });
+      await loadData(true);
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Não foi possível confirmar a revisão.",
       });
     } finally {
       setPublishingId(null);
@@ -884,6 +933,16 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                       <a className="action-secondary" href={reel.youtube.studio_url} target="_blank" rel="noreferrer">
                         Abrir checks no Studio
                       </a>
+                    ) : null}
+                    {reel.youtube?.status === "awaiting_studio_check" ? (
+                      <button
+                        className="action-secondary"
+                        type="button"
+                        onClick={() => void reviewYouTube(reel)}
+                        disabled={publishingId === reel.id}
+                      >
+                        Revisar conteúdo e metadados
+                      </button>
                     ) : null}
                     {reel.youtube?.status === "awaiting_studio_check" ? (
                       <button

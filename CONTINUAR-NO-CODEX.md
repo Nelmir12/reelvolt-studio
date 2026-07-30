@@ -58,7 +58,7 @@ npm run dev
 ```
 
 O ambiente local não recebe automaticamente os segredos de produção. Recursos
-que dependem da Meta, Google, OpenAI, Render ou do resolvedor podem aparecer
+que dependem da Meta, Google, GitHub Actions ou do resolvedor podem aparecer
 desconectados localmente; isso não remove nem altera a configuração hospedada.
 
 Antes de enviar mudanças:
@@ -86,12 +86,13 @@ git status
 - Crie/prepare um projeto Google e um OAuth Client do tipo aplicação Web.
 - Cadastre `/api/youtube/oauth/callback` no domínio do ReelVolt como redirect URI.
 - Conclua a tela de consentimento e a auditoria da YouTube Data API fora do código.
-- Configure no Sites as variáveis `YOUTUBE_*`, `OPENAI_*` e
+- Configure no Sites as variáveis `YOUTUBE_*`, `GITHUB_*` e
   `OWNED_SOURCE_ACCOUNTS` descritas em `.env.example`.
-- Crie o serviço a partir de `render.yaml` somente após autorizar eventual
-  cobrança. No Render entram apenas `REELVOLT_BASE_URL` e
-  `YOUTUBE_WORKER_SECRET`.
-- Implante o executor antes da versão do Sites. O canary deve ser um vídeo
+- Cadastre o mesmo `YOUTUBE_WORKER_SECRET` nos segredos do GitHub Actions. Use
+  um token fino, restrito a este repositório, para o Sites acionar o workflow.
+- Confirme que o GitHub interromperá o uso ao esgotar a franquia gratuita. O
+  workflow não possui agenda e só roda quando existe um Short na fila.
+- Publique o workflow no branch padrão antes da versão do Sites. O canary deve ser um vídeo
   próprio, enviado e mantido privado durante toda a validação.
 
 ## 7. Segurança
@@ -100,7 +101,7 @@ git status
 - Nunca adicione `.env` ao Git.
 - Não altere `project_id` em `.openai/hosting.json`.
 - Não remova as tabelas do D1 nem os objetos do R2.
-- Nunca copie o refresh token do YouTube para o Render.
+- Nunca copie o refresh token do YouTube para o GitHub.
 - Mantenha o GitHub privado enquanto o projeto contiver regras operacionais
   internas.
 

@@ -18,17 +18,19 @@ os vídeos. O Notion não faz parte do fluxo operacional.
 5. O MP4 inalterado é armazenado uma vez no R2. O usuário escolhe Instagram,
    YouTube ou ambos; clientes antigos sem `destinations` permanecem
    Instagram-only.
-6. Após a aprovação, o executor Render valida formato com FFprobe, extrai três
-   frames e áudio temporários com FFmpeg, transcreve, modera e gera metadados
-   específicos. Os temporários são removidos ao final.
+6. Após a aprovação, um GitHub Action acionado sob demanda valida formato com
+   FFprobe e envia o MP4 inalterado. Não existe polling ocioso nem serviço Render.
+   Sem uma chave paga de IA, o Short recebe metadados provisórios neutros e exige
+   revisão humana explícita no painel.
 7. A fila automática é opcional. Todo Reel precisa ser aprovado previamente e
    recebe um horário conforme o intervalo configurado; alterar os padrões não
    muda itens já aprovados.
 8. O Instagram segue `media_publish` pela Meta. O YouTube usa upload retomável
    e sempre cria o vídeo como privado.
-9. Depois do processamento, o painel abre o vídeo exato no YouTube Studio. O
-   Short somente fica público após o usuário confirmar que os checks estão
-   limpos e o backend revalidar os gates e a auditoria do projeto da API.
+9. Depois do processamento, o painel exige a revisão do vídeo e dos metadados e
+   abre o vídeo exato no YouTube Studio. O Short somente fica público após essas
+   duas confirmações e o backend revalidar os gates e a auditoria do projeto da
+   API.
 10. O Dashboard mantém métricas e rankings separados por plataforma, com
     snapshots diários e nos marcos de 1h, 24h, 72h e 7 dias.
 
@@ -55,11 +57,15 @@ As variáveis estão documentadas em `.env.example`:
   aplicação Web.
 - `YOUTUBE_TOKEN_SECRET`: chave exclusiva usada para criptografar o refresh
   token no D1.
-- `YOUTUBE_WORKER_SECRET`: autentica o polling e os callbacks do executor.
+- `YOUTUBE_WORKER_SECRET`: autentica o claim e os callbacks do executor.
+- `YOUTUBE_EXECUTOR_MODE=github`, `GITHUB_REPOSITORY`, `GITHUB_WORKFLOW_ID` e
+  `GITHUB_WORKFLOW_REF`: selecionam o executor gratuito sob demanda.
+- `GITHUB_ACTIONS_TOKEN`: token restrito a Actions neste único repositório.
 - `YOUTUBE_API_AUDITED`: somente `true` após a auditoria externa do projeto;
   enquanto for `false`, a liberação pública é bloqueada.
 - `OWNED_SOURCE_ACCOUNTS`: lista de contas próprias autorizadas.
-- `OPENAI_API_KEY` e `OPENAI_*_MODEL`: análise preventiva e geração estruturada.
+- `OPENAI_API_KEY` e `OPENAI_*_MODEL`: integração opcional e paga. Sem a chave,
+  o produto mantém o Short privado até a revisão humana.
 
 Com Instagram Login, o token precisa das permissões
 `instagram_business_basic`, `instagram_business_content_publish` e
@@ -101,10 +107,11 @@ npm install
 npm run dev
 ```
 
-O executor está em `youtube-uploader/` e o blueprint em `render.yaml`. No
-Render, configure somente `REELVOLT_BASE_URL` e `YOUTUBE_WORKER_SECRET`; o token
-do Google nunca deve sair do D1. A ativação do serviço pode gerar cobrança e
-deve ser autorizada antes.
+O executor está em `youtube-uploader/` e o workflow em
+`.github/workflows/youtube-uploader.yml`. O Sites aciona uma execução somente
+quando existe um Short na fila; o refresh token do Google nunca sai do D1.
+Antes de ativar, confirme no GitHub que não existe forma de pagamento ou que o
+orçamento de Actions interrompe o uso ao atingir zero.
 
 Para continuar o projeto em outra máquina usando o Codex, consulte
 [`CONTINUAR-NO-CODEX.md`](CONTINUAR-NO-CODEX.md).

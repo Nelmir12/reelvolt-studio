@@ -33,10 +33,11 @@ O fluxo operacional atual é:
 5. Reels destinados à publicação aguardam aprovação humana.
 6. Após a aprovação, Instagram e YouTube mantêm estados independentes. O
    Instagram usa exclusivamente a API oficial da Meta.
-7. Um executor Render autenticado analisa o mesmo MP4 e realiza upload retomável
-   no YouTube sempre como privado. Frames e áudio temporários são excluídos.
-8. O Short somente pode ficar público após processamento, gates internos,
-   auditoria da API e confirmação explícita dos checks no YouTube Studio.
+7. Um GitHub Action autenticado e acionado somente quando há trabalho valida o
+   mesmo MP4 e realiza upload retomável no YouTube sempre como privado.
+8. Sem análise paga, conteúdo e metadados exigem revisão humana explícita. O
+   Short somente pode ficar público após processamento, gates internos,
+   auditoria da API e confirmação separada dos checks no YouTube Studio.
 9. Insights oficiais de cada plataforma alimentam dashboards separados; alcance
    do Instagram nunca é somado às views do YouTube.
 

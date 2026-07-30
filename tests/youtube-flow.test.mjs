@@ -80,3 +80,22 @@ test("public release is gated by explicit checks, audit, processing and moderati
   assert.match(source, /technical_eligible/);
   assert.match(source, /privacyStatus: "public"/);
 });
+
+test("zero-cost mode dispatches one GitHub job and requires manual review", async () => {
+  const worker = await readFile(new URL("../worker/youtube.ts", import.meta.url), "utf8");
+  const executor = await readFile(new URL("../youtube-uploader/src/index.mjs", import.meta.url), "utf8");
+  const workflow = await readFile(
+    new URL("../.github/workflows/youtube-uploader.yml", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(worker, /YOUTUBE_EXECUTOR_MODE/);
+  assert.match(worker, /workflow_dispatch|actions\/workflows/);
+  assert.match(worker, /moderation_status = 'manual_review'/);
+  assert.match(worker, /manualReviewConfirmed !== true/);
+  assert.match(executor, /RUN_ONCE/);
+  assert.match(executor, /analysisMode === "openai"/);
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.doesNotMatch(workflow, /\bschedule:/);
+  assert.match(workflow, /privacy|Process one private Short/i);
+});

@@ -7,6 +7,11 @@ export interface YouTubeEnv {
   YOUTUBE_TOKEN_SECRET?: string;
   YOUTUBE_WORKER_SECRET?: string;
   YOUTUBE_API_AUDITED?: string;
+  YOUTUBE_EXECUTOR_MODE?: string;
+  GITHUB_ACTIONS_TOKEN?: string;
+  GITHUB_REPOSITORY?: string;
+  GITHUB_WORKFLOW_ID?: string;
+  GITHUB_WORKFLOW_REF?: string;
   OWNED_SOURCE_ACCOUNTS?: string;
   OPENAI_API_KEY?: string;
   OPENAI_METADATA_MODEL?: string;
@@ -283,13 +288,68 @@ function ownedSourceAccount(sourceAccount: string | null, env: YouTubeEnv) {
 }
 
 export function youtubeConfigured(env: YouTubeEnv) {
+  const executorMode = (env.YOUTUBE_EXECUTOR_MODE || "external").toLowerCase();
+  const executorConfigured = executorMode !== "github"
+    || Boolean(env.GITHUB_ACTIONS_TOKEN && env.GITHUB_REPOSITORY && env.GITHUB_WORKFLOW_ID);
   return Boolean(
     env.YOUTUBE_CLIENT_ID
     && env.YOUTUBE_CLIENT_SECRET
     && env.YOUTUBE_TOKEN_SECRET
     && env.YOUTUBE_WORKER_SECRET
-    && env.OPENAI_API_KEY,
+    && executorConfigured,
   );
+}
+
+export async function dispatchYouTubeExecutor(env: YouTubeEnv) {
+  if ((env.YOUTUBE_EXECUTOR_MODE || "").toLowerCase() !== "github") {
+    return { dispatched: false, reason: "executor_not_github" };
+  }
+  if (!env.GITHUB_ACTIONS_TOKEN || !env.GITHUB_REPOSITORY || !env.GITHUB_WORKFLOW_ID) {
+    return { dispatched: false, reason: "github_not_configured" };
+  }
+  const candidate = await env.DB.prepare(`SELECT id, status FROM youtube_publications
+    WHERE (
+      status IN ('queued', 'retrying')
+      AND (next_attempt_at IS NULL OR datetime(next_attempt_at) <= CURRENT_TIMESTAMP)
+    ) OR (
+      status = 'dispatched'
+      AND datetime(next_attempt_at) <= CURRENT_TIMESTAMP
+    )
+    ORDER BY COALESCE(next_attempt_at, requested_at, created_at), id
+    LIMIT 1`).first<{ id: number; status: string }>();
+  if (!candidate) return { dispatched: false, reason: "empty_queue" };
+  const reserved = await env.DB.prepare(`UPDATE youtube_publications
+    SET status = 'dispatched', next_attempt_at = datetime('now', '+10 minutes'),
+      error = NULL, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND status = ?`).bind(candidate.id, candidate.status).run();
+  if (!reserved.meta.changes) return { dispatched: false, reason: "already_dispatched" };
+  const workflow = encodeURIComponent(env.GITHUB_WORKFLOW_ID);
+  const response = await fetch(
+    `https://api.github.com/repos/${env.GITHUB_REPOSITORY}/actions/workflows/${workflow}/dispatches`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${env.GITHUB_ACTIONS_TOKEN}`,
+        "content-type": "application/json",
+        "user-agent": "ReelVolt-Studio",
+        "x-github-api-version": "2022-11-28",
+      },
+      body: JSON.stringify({ ref: env.GITHUB_WORKFLOW_REF || "master" }),
+    },
+  );
+  if (!response.ok) {
+    const message = cleanText(await response.text(), 500);
+    await env.DB.prepare(`UPDATE youtube_publications SET status = ?,
+      next_attempt_at = CURRENT_TIMESTAMP, error = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND status = 'dispatched'`).bind(
+        candidate.status === "retrying" ? "retrying" : "queued",
+        `O executor gratuito não pôde ser acionado (HTTP ${response.status}). ${message}`,
+        candidate.id,
+      ).run();
+    throw new Error(`GitHub Actions recusou o acionamento (HTTP ${response.status}).`);
+  }
+  return { dispatched: true, jobId: candidate.id };
 }
 
 export async function youtubeConnection(env: YouTubeEnv) {
@@ -668,8 +728,12 @@ async function claimJob(request: Request, env: YouTubeEnv) {
       SELECT yp.id FROM youtube_publications yp
       JOIN reels r ON r.id = yp.reel_id
       WHERE r.status = 'ready'
-        AND yp.status IN ('queued', 'retrying')
-        AND (yp.next_attempt_at IS NULL OR datetime(yp.next_attempt_at) <= CURRENT_TIMESTAMP)
+        AND yp.status IN ('queued', 'retrying', 'dispatched')
+        AND (
+          yp.status = 'dispatched'
+          OR yp.next_attempt_at IS NULL
+          OR datetime(yp.next_attempt_at) <= CURRENT_TIMESTAMP
+        )
         AND (yp.lease_expires_at IS NULL OR datetime(yp.lease_expires_at) <= CURRENT_TIMESTAMP)
       ORDER BY COALESCE(yp.next_attempt_at, yp.requested_at, yp.created_at), yp.id
       LIMIT 1
@@ -736,17 +800,17 @@ async function claimJob(request: Request, env: YouTubeEnv) {
 
 async function analyzeJob(request: Request, jobId: number, env: YouTubeEnv) {
   if (!validWorker(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
-  if (!env.OPENAI_API_KEY) return json({ error: "OPENAI_API_KEY não configurada." }, { status: 503 });
   const form = await request.formData();
   const lease = cleanText(form.get("lease"), 100);
   const fingerprint = cleanText(form.get("contentFingerprint"), 128);
-  const job = await env.DB.prepare(`SELECT yp.reel_id, r.source_account, cr.context
+  const job = await env.DB.prepare(`SELECT yp.reel_id, r.source_account, cr.context, cr.rights_basis
     FROM youtube_publications yp JOIN reels r ON r.id = yp.reel_id
     LEFT JOIN content_reviews cr ON cr.reel_id = yp.reel_id
     WHERE yp.id = ? AND yp.lease_token = ?`).bind(jobId, lease).first<{
       reel_id: number;
       source_account: string | null;
       context: string | null;
+      rights_basis: string | null;
     }>();
   if (!job) return json({ error: "Lease inválido." }, { status: 409 });
   if (!/^[a-f0-9]{64}$/i.test(fingerprint)) {
@@ -778,6 +842,41 @@ async function analyzeJob(request: Request, jobId: number, env: YouTubeEnv) {
       ),
     ]);
     return json({ blocked: true, reasons: ["duplicate"] });
+  }
+  if (!env.OPENAI_API_KEY) {
+    const source = cleanText(job.source_account, 40) || "the connected creator";
+    const title = cleanText(`Short #${job.reel_id} from ${source}`, 100);
+    const rightsLabel = job.rights_basis === "licensed" ? "Licensed" : "Creator-owned";
+    const description = cleanText(
+      `${rightsLabel} private review copy from ${source}. Review the video, title, description and hashtags in ReelVolt before making it public.`,
+      1200,
+    );
+    const tags = ["Shorts"];
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE content_reviews SET content_fingerprint = ?,
+        moderation_status = 'manual_review', moderation_reasons = ?,
+        updated_at = CURRENT_TIMESTAMP WHERE reel_id = ?`).bind(
+          fingerprint,
+          JSON.stringify(["zero_cost_manual_review_required"]),
+          job.reel_id,
+        ),
+      env.DB.prepare(`UPDATE youtube_publications SET status = 'uploading', title = ?,
+        description = ?, tags_json = ?, error = NULL, worker_heartbeat_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP WHERE id = ? AND lease_token = ?`)
+        .bind(title, description, JSON.stringify(tags), jobId, lease),
+    ]);
+    return json({
+      blocked: false,
+      manualReviewRequired: true,
+      metadata: {
+        youtubeTitle: title,
+        youtubeDescription: description,
+        youtubeTags: tags,
+        instagramCaption: "",
+        summary: cleanText(job.context, 500),
+        riskFlags: ["manual_review_required"],
+      },
+    });
   }
   const audio = form.get("audio");
   let transcript = "";
@@ -1182,8 +1281,12 @@ async function retryPublication(request: Request, reelId: number, env: YouTubeEn
 async function updateMetadata(request: Request, reelId: number, env: YouTubeEnv, auth: YouTubeRequestAuth) {
   if (!auth.validUser) return json({ error: "Não autorizado." }, { status: 401 });
   if (!auth.validOrigin) return json({ error: "Origem inválida." }, { status: 403 });
-  if (!env.OPENAI_API_KEY) return json({ error: "A remoderação de metadados não está configurada." }, { status: 503 });
-  const data = await request.json() as { title?: string; description?: string; tags?: string[] };
+  const data = await request.json() as {
+    title?: string;
+    description?: string;
+    tags?: string[];
+    manualReviewConfirmed?: boolean;
+  };
   const title = cleanText(data.title, 100);
   const description = cleanText(data.description, 5000);
   const tags = Array.isArray(data.tags)
@@ -1204,6 +1307,43 @@ async function updateMetadata(request: Request, reelId: number, env: YouTubeEnv,
     return json({ error: "Metadados não podem mais ser alterados." }, { status: 409 });
   }
   const candidate = [title, description, tags.join(" ")].join("\n\n");
+  if (!env.OPENAI_API_KEY) {
+    if (data.manualReviewConfirmed !== true) {
+      return json({
+        error: "Confirme que você revisou o vídeo completo e que os metadados descrevem apenas o que aparece nele.",
+      }, { status: 400 });
+    }
+    if (/[\u0000-\u001f\u007f]/.test(candidate)) {
+      return json({ error: "Os metadados contêm caracteres de controle inválidos." }, { status: 400 });
+    }
+    if (current.video_id) {
+      const accessToken = await googleAccessToken(env);
+      await googleJson(
+        "https://www.googleapis.com/youtube/v3/videos?part=snippet",
+        accessToken,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            id: current.video_id,
+            snippet: { title, description, tags, categoryId: "24", defaultLanguage: "en" },
+          }),
+        },
+      );
+    }
+    const result = await env.DB.prepare(`UPDATE youtube_publications SET title = ?, description = ?,
+      tags_json = ?, error = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE reel_id = ? AND status NOT IN ('published', 'publishing')`)
+      .bind(title, description, JSON.stringify(tags), reelId)
+      .run();
+    if (result.meta.changes) {
+      await env.DB.prepare(`UPDATE content_reviews SET moderation_status = 'safe',
+        moderation_reasons = ?, updated_at = CURRENT_TIMESTAMP WHERE reel_id = ?`)
+        .bind(JSON.stringify([`manual_review_confirmed:${auth.userEmail}`]), reelId).run();
+    }
+    return result.meta.changes
+      ? json({ accepted: true, manualReviewConfirmed: true })
+      : json({ error: "Metadados não podem mais ser alterados." }, { status: 409 });
+  }
   const moderationResponse = await fetch("https://api.openai.com/v1/moderations", {
     method: "POST",
     headers: {
