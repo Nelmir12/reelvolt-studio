@@ -11,10 +11,6 @@ type Operations = {
   failed: number;
   stored_bytes: number;
   last_seven_days: number;
-  youtube_processing: number;
-  youtube_awaiting_checks: number;
-  youtube_published: number;
-  youtube_failed: number;
 };
 
 type InsightReel = {
@@ -90,40 +86,6 @@ type Analytics = {
     body: string;
     tone: string;
   }>;
-  youtube: {
-    summary: {
-      published_shorts: number;
-      total_views: number;
-      engaged_views: number;
-      total_interactions: number;
-      subscribers_gained: number;
-      average_view_duration_ms: number;
-      average_view_percentage_bps: number;
-      engagement_rate: number;
-    };
-    periods: ViewPeriods;
-    history: Array<{
-      captured_date: string;
-      views: number;
-    }>;
-    shorts: Array<{
-      id: number;
-      rank: number;
-      video_id: string;
-      video_url: string | null;
-      published_at: string | null;
-      downloaded_at: string | null;
-      source_account: string | null;
-      views: number;
-      engaged_views: number;
-      likes: number;
-      comments: number;
-      shares: number;
-      subscribers_gained: number;
-      average_view_duration_ms: number;
-      average_view_percentage_bps: number;
-    }>;
-  };
   sync: {
     status: "connected" | "permission_required" | "waiting" | "empty";
     last_synced_at: string | null;
@@ -291,9 +253,6 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
     { label: "Para aprovar", value: operations.awaiting_approval, note: "aguardando sua decisão" },
     { label: "Publicando", value: operations.publishing, note: "processando agora" },
     { label: "Publicados", value: operations.published, note: operations.failed ? `${operations.failed} com falha` : "sem falhas" },
-    { label: "Shorts privados", value: operations.youtube_awaiting_checks, note: "aguardando checks no Studio" },
-    { label: "YouTube em curso", value: operations.youtube_processing, note: "análise, upload ou processamento" },
-    { label: "Shorts públicos", value: operations.youtube_published, note: operations.youtube_failed ? `${operations.youtube_failed} com falha ou bloqueio` : "sem falhas" },
   ];
   const performanceCards = analytics ? [
     { label: "Visualizações totais", value: compactNumber.format(analytics.summary.total_views), note: `${analytics.summary.published_reels} Reels medidos`, accent: true },
@@ -314,7 +273,7 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
         <div>
           <span className="eyebrow">{account}</span>
           <h1>Métricas</h1>
-          <p>Desempenho separado dos Reels e Shorts, sem somar alcance entre plataformas.</p>
+          <p>Desempenho dos Reels publicados no Instagram.</p>
         </div>
         <aside className="sync-card">
           <span className={`connection-dot ${analytics?.sync.status === "connected" ? "online" : ""}`} />
@@ -379,77 +338,10 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
         )}
       </section>
 
-      <section className="dashboard-section youtube-analytics">
-        <div className="dashboard-section-heading">
-          <div>
-            <span>02 · YOUTUBE</span>
-            <h2>Desempenho dos Shorts</h2>
-          </div>
-          <p>Views e engaged views permanecem separadas do alcance do Instagram.</p>
-        </div>
-        {loading ? (
-          <div className="analytics-loading">Carregando YouTube Analytics…</div>
-        ) : (
-          <>
-            <div className="performance-grid">
-              <article className="performance-card accent">
-                <span>Views</span>
-                <strong>{compactNumber.format(analytics?.youtube.summary.total_views || 0)}</strong>
-                <small>{analytics?.youtube.summary.published_shorts || 0} Shorts públicos</small>
-              </article>
-              <article className="performance-card">
-                <span>Engaged views</span>
-                <strong>{compactNumber.format(analytics?.youtube.summary.engaged_views || 0)}</strong>
-                <small>denominador próprio do YouTube</small>
-              </article>
-              <article className="performance-card">
-                <span>Duração média</span>
-                <strong>{formatWatchTime(analytics?.youtube.summary.average_view_duration_ms || 0)}</strong>
-                <small>tempo médio assistido</small>
-              </article>
-              <article className="performance-card">
-                <span>Percentual assistido</span>
-                <strong>{((analytics?.youtube.summary.average_view_percentage_bps || 0) / 100).toFixed(1).replace(".", ",")}%</strong>
-                <small>média entre Shorts</small>
-              </article>
-              <article className="performance-card">
-                <span>Inscritos ganhos</span>
-                <strong>{number.format(analytics?.youtube.summary.subscribers_gained || 0)}</strong>
-                <small>atribuídos aos Shorts</small>
-              </article>
-            </div>
-            <PeriodSummary periods={analytics?.youtube.periods} platform="YouTube" />
-            {analytics?.youtube.shorts.length ? (
-              <div className="youtube-ranking">
-                {analytics.youtube.shorts.slice(0, 10).map((short) => (
-                  <article key={short.id}>
-                    <span>#{short.rank}</span>
-                    <div>
-                      <strong>Short do Reel #{short.id}</strong>
-                      <small>
-                        {number.format(short.views)} views · {number.format(short.engaged_views)} engaged ·
-                        {" "}{number.format(short.likes)} likes · {number.format(short.comments)} comentários ·
-                        {" "}{number.format(short.shares)} compartilhamentos
-                      </small>
-                      <small>
-                        MP4 pronto: {formatDate(short.downloaded_at)} · YouTube público: {formatDate(short.published_at)}
-                      </small>
-                    </div>
-                    {short.video_url ? <a href={short.video_url} target="_blank" rel="noreferrer">Abrir</a> : null}
-                  </article>
-                ))}
-              </div>
-            ) : (
-              <div className="history-empty">Os Shorts aparecem aqui somente depois de ficarem públicos e receberem métricas.</div>
-            )}
-          </>
-        )}
-      </section>
-
       <section className="dashboard-section">
         <div className="dashboard-section-heading">
           <div>
-            <span>03 · OPERAÇÃO</span>
+            <span>02 · OPERAÇÃO</span>
             <h2>Visão operacional</h2>
           </div>
           <p>Estes são os indicadores do fluxo de download, aprovação e publicação.</p>

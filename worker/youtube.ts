@@ -19,6 +19,10 @@ export interface YouTubeEnv {
   OPENAI_MODERATION_MODEL?: string;
 }
 
+// The YouTube publishing experiment is retired. Historical tables and records
+// remain intact so removing the feature never deletes production data.
+export const YOUTUBE_PUBLISHING_ENABLED = false;
+
 export type YouTubeRequestAuth = {
   userEmail: string;
   validUser: boolean;
@@ -288,6 +292,7 @@ function ownedSourceAccount(sourceAccount: string | null, env: YouTubeEnv) {
 }
 
 export function youtubeConfigured(env: YouTubeEnv) {
+  if (!YOUTUBE_PUBLISHING_ENABLED) return false;
   const executorMode = (env.YOUTUBE_EXECUTOR_MODE || "external").toLowerCase();
   const executorConfigured = executorMode !== "github"
     || Boolean(env.GITHUB_ACTIONS_TOKEN && env.GITHUB_REPOSITORY && env.GITHUB_WORKFLOW_ID);
@@ -301,6 +306,9 @@ export function youtubeConfigured(env: YouTubeEnv) {
 }
 
 export async function dispatchYouTubeExecutor(env: YouTubeEnv) {
+  if (!YOUTUBE_PUBLISHING_ENABLED) {
+    return { dispatched: false, reason: "youtube_publishing_retired" };
+  }
   if ((env.YOUTUBE_EXECUTOR_MODE || "").toLowerCase() !== "github") {
     return { dispatched: false, reason: "executor_not_github" };
   }
@@ -353,6 +361,17 @@ export async function dispatchYouTubeExecutor(env: YouTubeEnv) {
 }
 
 export async function youtubeConnection(env: YouTubeEnv) {
+  if (!YOUTUBE_PUBLISHING_ENABLED) {
+    return {
+      configured: false,
+      connected: false,
+      audited: false,
+      channel_id: null,
+      channel_title: null,
+      scopes: [],
+      connected_at: null,
+    };
+  }
   const row = await env.DB.prepare(
     "SELECT channel_id, channel_title, scopes, updated_at FROM youtube_auth WHERE id = 1",
   ).first<{ channel_id: string; channel_title: string; scopes: string; updated_at: string }>();
@@ -416,6 +435,9 @@ export async function queueYouTubePublication(
   rightsConfirmed: boolean,
   env: YouTubeEnv,
 ) {
+  if (!YOUTUBE_PUBLISHING_ENABLED) {
+    return { requested: false, status: "retired" };
+  }
   const review = await env.DB.prepare(`SELECT youtube_enabled, rights_basis, moderation_status
     FROM content_reviews WHERE reel_id = ?`).bind(reelId).first<{
       youtube_enabled: number;
@@ -1716,6 +1738,13 @@ export async function handleYouTubeRequest(
   auth: YouTubeRequestAuth,
 ): Promise<Response | null> {
   const url = new URL(request.url);
+  const isRetiredYouTubeRoute = url.pathname.startsWith("/api/youtube/")
+    || url.pathname.startsWith("/api/internal/youtube/")
+    || /^\/api\/reels\/\d+\/youtube\//.test(url.pathname)
+    || url.pathname.startsWith("/worker-media/");
+  if (!YOUTUBE_PUBLISHING_ENABLED && isRetiredYouTubeRoute) {
+    return json({ error: "A publicação no YouTube foi desativada no ReelVolt." }, { status: 410 });
+  }
   const workerMediaMatch = url.pathname.match(/^\/worker-media\/(\d+)\.mp4$/);
   if (workerMediaMatch && (request.method === "GET" || request.method === "HEAD")) {
     return serveWorkerMedia(request, Number(workerMediaMatch[1]), env);

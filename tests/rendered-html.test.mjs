@@ -38,7 +38,7 @@ test("server-renders the authenticated Reel Inbox", async () => {
   assert.match(html, /<h1>Produção<\/h1>/);
   assert.match(html, /Novo Reel/);
   assert.match(html, /Instagram Reels/);
-  assert.match(html, /YouTube Shorts/);
+  assert.doesNotMatch(html, /YouTube|Shorts/);
   assert.match(html, /Produção recente/);
   assert.match(html, /<h2>Publicação<\/h2>/);
   assert.match(html, /Usar legenda/);
@@ -56,14 +56,14 @@ test("server-renders the analytics dashboard tab", async () => {
   const html = await response.text();
   assert.match(html, /<h1>Métricas<\/h1>/);
   assert.match(html, /Desempenho dos Reels|Carregando desempenho/);
-  assert.match(html, /Desempenho dos Shorts/);
+  assert.doesNotMatch(html, /YouTube|Shorts/);
   assert.match(html, /Visão operacional/);
   assert.match(html, /Como buscar mais views/);
   assert.match(html, /Desempenho por Reel/);
   assert.doesNotMatch(html, /Dados que viram/);
 });
 
-test("declares the protected intake, dashboard and official multichannel publishing flow", async () => {
+test("declares the protected Instagram flow and retires YouTube publishing", async () => {
   const [worker, youtube, readme, manifest, inbox, analytics] = await Promise.all([
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
     readFile(new URL("../worker/youtube.ts", import.meta.url), "utf8"),
@@ -98,28 +98,20 @@ test("declares the protected intake, dashboard and official multichannel publish
   assert.match(worker, /processPublicationQueue/);
   assert.match(worker, /publish-cover/);
   assert.match(worker, /PUBLISH_URL_SECRET/);
-  assert.match(worker, /queueYouTubePublication/);
   assert.match(worker, /destinations/);
-  assert.match(youtube, /youtube\.upload/);
-  assert.match(youtube, /yt-analytics\.readonly/);
-  assert.match(youtube, /code_challenge_method/);
-  assert.match(youtube, /privacyStatus: "public"/);
-  assert.match(youtube, /YOUTUBE_API_AUDITED/);
-  assert.match(youtube, /awaiting_studio_check/);
-  assert.match(youtube, /status: range \? 206 : 200/);
+  assert.match(youtube, /YOUTUBE_PUBLISHING_ENABLED = false/);
+  assert.match(youtube, /youtube_publishing_retired/);
+  assert.match(youtube, /A publicação no YouTube foi desativada no ReelVolt/);
   assert.doesNotMatch(worker, /TELEGRAM_BOT_TOKEN|telegram\/webhook/i);
   assert.match(manifest, /"share_target"/);
   assert.match(manifest, /"display": "standalone"/);
   assert.match(inbox, /const REELS_PER_PAGE = 6/);
   assert.match(inbox, /visibleReels\.map/);
   assert.match(inbox, /Aprovar para a fila/);
-  assert.match(inbox, /APROVAÇÃO POR DESTINO/);
-  assert.match(inbox, /Publicar também no YouTube/);
+  assert.match(inbox, /APROVAÇÃO DO INSTAGRAM/);
   assert.match(inbox, /MP4 pronto/);
   assert.match(inbox, /Publicado no Instagram/);
-  assert.match(inbox, /Envio ainda não iniciado/);
-  assert.match(inbox, /Iniciar envio ao YouTube/);
-  assert.match(inbox, /Publicar Short no YouTube/);
+  assert.doesNotMatch(inbox, /YouTube|Shorts/);
   assert.match(inbox, /Como acompanhar/);
   assert.doesNotMatch(inbox, /<option value="auto">/);
   assert.match(analytics, /const REELS_PER_PAGE = 6/);
@@ -128,8 +120,6 @@ test("declares the protected intake, dashboard and official multichannel publish
   assert.match(analytics, /visibleInsightReels\.map/);
   assert.match(analytics, /Últimos 7 dias/);
   assert.match(analytics, /Últimos 30 dias/);
-  assert.match(readme, /fallback privado quando o Instagram exige login/);
-  assert.match(readme, /instância privada[\s\S]*Cobalt/);
-  assert.match(readme, /O Notion não faz\s+parte do fluxo operacional/);
-  assert.match(readme, /sempre cria o vídeo como privado/);
+  assert.match(readme, /resolvedor privado\/licenciado/);
+  assert.match(readme, /experimento de publicação no YouTube foi retirado/);
 });

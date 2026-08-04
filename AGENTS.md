@@ -18,8 +18,8 @@ ou alterar o projeto.
 ## Objetivo e arquitetura oficial
 
 O ReelVolt Studio é uma PWA privada para receber links de Reels autorizados,
-baixar os vídeos em MP4, gerenciar aprovação e distribuição multicanal e
-consultar Insights da conta `@btsupply_` e do canal YouTube conectado.
+baixar os vídeos em MP4, gerenciar aprovação e publicação no Instagram e
+consultar Insights da conta `@btsupply_`.
 
 O fluxo operacional atual é:
 
@@ -31,15 +31,12 @@ O fluxo operacional atual é:
 4. O MP4 é armazenado no R2, enquanto estados, preferências, identificadores e
    métricas ficam no D1.
 5. Reels destinados à publicação aguardam aprovação humana.
-6. Após a aprovação, Instagram e YouTube mantêm estados independentes. O
-   Instagram usa exclusivamente a API oficial da Meta.
-7. Um GitHub Action autenticado e acionado somente quando há trabalho valida o
-   mesmo MP4 e realiza upload retomável no YouTube sempre como privado.
-8. Sem análise paga, conteúdo e metadados exigem revisão humana explícita. O
-   Short somente pode ficar público após processamento, gates internos,
-   auditoria da API e confirmação separada dos checks no YouTube Studio.
-9. Insights oficiais de cada plataforma alimentam dashboards separados; alcance
-   do Instagram nunca é somado às views do YouTube.
+6. Após a aprovação, o Instagram usa exclusivamente a API oficial da Meta.
+7. Insights oficiais do Instagram alimentam o dashboard e o histórico.
+
+O experimento de publicação no YouTube foi retirado. Preserve suas tabelas,
+credenciais e registros históricos, mas não exponha opções, rotas operacionais,
+executores ou métricas do YouTube sem uma nova solicitação explícita do usuário.
 
 Notion, Telegram e Direct do Instagram não fazem parte do fluxo operacional
 atual. Referências remanescentes a essas integrações devem ser tratadas como
@@ -83,7 +80,7 @@ ou outro bucket R2 por conveniência.
 - Não automatize sites ou APIs cujos termos proíbam bots, scraping ou downloads
   automatizados. DownReels e ferramentas semelhantes não devem ser usados como
   backend sem uma autorização e uma licença compatíveis.
-- Use as APIs oficiais da Meta e do YouTube para publicar e consultar Insights.
+- Use a API oficial da Meta para publicar e consultar Insights.
 - Solicite apenas as permissões mínimas necessárias da Meta.
 - Nunca coloque senhas, tokens, códigos de verificação, chaves ou valores de
   `.env` em código, logs, commits, capturas ou mensagens.
@@ -125,8 +122,8 @@ A fila automática pode publicar no Instagram sem uma nova intervenção somente
 já tiver sido aprovado explicitamente pelo usuário. A aprovação feita no painel
 é autorização para aquele Reel; ela não autoriza outros itens. Uma autorização
 para implantar o site também não autoriza publicar conteúdo no Instagram, e
-vice-versa. A aprovação multicanal autoriza somente o upload privado no YouTube;
-a mudança para público exige a confirmação separada dos checks daquele Short.
+vice-versa. Não reative aprovações ou uploads multicanal enquanto o experimento
+do YouTube estiver retirado.
 
 ## Git e preservação do trabalho
 
@@ -207,16 +204,13 @@ mais recente.
   aprovados.
 - Preserve informações claras de status, erro, agendamento e resultado da
   publicação.
-- Exiba separadamente datas de recebimento/download e de publicação por
-  plataforma. Resumos de hoje, ontem, 7 dias e 30 dias devem derivar de
+- Exiba separadamente datas de recebimento/download e de publicação no
+  Instagram. Resumos de hoje, ontem, 7 dias e 30 dias devem derivar de
   snapshots reais e indicar quando ainda não houver histórico suficiente.
-- Na Produção, use linguagem de usuário final e estados independentes por
-  plataforma. Nunca mostre `private` ou outro valor técnico como se confirmasse
-  um upload que ainda não criou um vídeo externo.
-- A aprovação para Instagram e YouTube deve iniciar os dois ramos em paralelo;
-  metadados ou upload do YouTube não podem bloquear a publicação no Instagram.
-- Em telas mobile, mantenha uma ação principal por próximo passo e empilhe os
-  estados de Instagram e YouTube para leitura sem zoom ou rolagem horizontal.
+- Na Produção, use linguagem de usuário final e mostre claramente o estado do
+  Instagram.
+- Em telas mobile, mantenha uma ação principal por próximo passo, sem exigir
+  zoom ou rolagem horizontal.
 
 ## Validação e qualidade
 

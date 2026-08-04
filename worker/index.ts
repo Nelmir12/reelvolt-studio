@@ -410,12 +410,11 @@ function sanitizeTargets(
   defaultDestinations: Array<"instagram" | "youtube">,
 ): ContentTargetInput {
   const requested = Array.isArray(destinations)
-    ? destinations.filter((value): value is "instagram" | "youtube" =>
-      value === "instagram" || value === "youtube")
-    : defaultDestinations;
+    ? destinations.filter((value): value is "instagram" => value === "instagram")
+    : defaultDestinations.filter((value): value is "instagram" => value === "instagram");
   return {
     instagramEnabled: requested.includes("instagram"),
-    youtubeEnabled: requested.includes("youtube"),
+    youtubeEnabled: false,
     rightsBasis: input.rightsBasis === "licensed" ? "licensed" : "owned",
     context: sanitizeText(input.context, 800),
     madeForKids: input.madeForKids === true,
