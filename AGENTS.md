@@ -23,14 +23,18 @@ consultar Insights da conta `@btsupply_`.
 
 O fluxo operacional atual é:
 
-1. O usuário envia um link pelo ReelVolt no iPhone, pelo PWA ou pelo mecanismo
-   de compartilhamento compatível.
-2. O serviço valida o usuário, a URL e a confirmação dos direitos de uso.
+1. O usuário envia um link pelo ReelVolt no iPhone/PWA ou compartilha um Reel
+   de `@nelmirjr` para o Direct de `@btsupply_`.
+2. O serviço valida o usuário, a URL, a assinatura do webhook e a confirmação
+   dos direitos de uso. No Direct, somente o Instagram-scoped ID vinculado ao
+   username `@nelmirjr` é aceito.
 3. O vídeo é obtido diretamente quando possível; uma instância privada ou
    licenciada do Cobalt pode ser usada como fallback.
 4. O MP4 é armazenado no R2, enquanto estados, preferências, identificadores e
    métricas ficam no D1.
-5. Reels destinados à publicação aguardam aprovação humana.
+5. Reels destinados à publicação aguardam aprovação humana. No fluxo do Direct,
+   a confirmação de direitos prepara o MP4 e um botão abre o item exato no
+   ReelVolt; somente o botão final do painel autoriza a publicação daquele Reel.
 6. Após a aprovação, o Instagram usa exclusivamente a API oficial da Meta.
 7. Insights oficiais do Instagram alimentam o dashboard e o histórico.
 
@@ -38,9 +42,9 @@ O experimento de publicação no YouTube foi retirado. Preserve suas tabelas,
 credenciais e registros históricos, mas não exponha opções, rotas operacionais,
 executores ou métricas do YouTube sem uma nova solicitação explícita do usuário.
 
-Notion, Telegram e Direct do Instagram não fazem parte do fluxo operacional
-atual. Referências remanescentes a essas integrações devem ser tratadas como
-legado, salvo se o usuário solicitar expressamente sua reativação.
+Notion e Telegram não fazem parte do fluxo operacional atual. O Direct do
+Instagram foi reativado exclusivamente como entrada autenticada para
+`@nelmirjr`; ele não substitui a aprovação individual no ReelVolt.
 
 ## Fontes de verdade
 

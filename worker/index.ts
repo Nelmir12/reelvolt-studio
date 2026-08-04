@@ -35,6 +35,9 @@ interface Env extends YouTubeEnv {
   INSTAGRAM_USER_ID?: string;
   INSTAGRAM_API_VERSION?: string;
   INSTAGRAM_GRAPH_HOST?: string;
+  INSTAGRAM_DIRECT_ALLOWED_USERNAME?: string;
+  META_APP_SECRET?: string;
+  META_VERIFY_TOKEN?: string;
   PUBLISH_URL_SECRET?: string;
 }
 
@@ -65,6 +68,7 @@ type QueueResult = {
 
 type ReelRecord = {
   id: number;
+  sender_id: string;
   source_url: string;
   rules: string | null;
   source_account: string | null;
@@ -142,6 +146,30 @@ type InstagramInsightResult = {
   total_value?: { value?: number };
 };
 
+type InstagramWebhookMessage = {
+  sender?: { id?: string };
+  recipient?: { id?: string };
+  message?: {
+    mid?: string;
+    text?: string;
+    is_echo?: boolean;
+    is_self?: boolean;
+    quick_reply?: { payload?: string };
+    attachments?: Array<{
+      type?: string;
+      payload?: Record<string, unknown>;
+    }>;
+  };
+};
+
+type InstagramWebhookPayload = {
+  object?: string;
+  entry?: Array<{
+    id?: string;
+    messaging?: InstagramWebhookMessage[];
+  }>;
+};
+
 type PublishedReelInsightTarget = {
   id: number;
   instagram_media_id: string;
@@ -155,6 +183,7 @@ const COVER_MODES = new Set<CoverMode>(["fixed", "video", "none"]);
 const DEFAULT_INTERVAL_MINUTES = 60;
 const MIN_INTERVAL_MINUTES = 15;
 const MAX_INTERVAL_MINUTES = 7 * 24 * 60;
+const DIRECT_RIGHTS_PAYLOAD = /^reelvolt:rights:(owned|licensed):(\d+)$/;
 
 const CREATE_REELS = `CREATE TABLE IF NOT EXISTS reels (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -729,6 +758,222 @@ async function graphRequest(
   return result;
 }
 
+function directAllowedUsername(env: Env) {
+  return (env.INSTAGRAM_DIRECT_ALLOWED_USERNAME || "")
+    .trim()
+    .replace(/^@+/, "")
+    .toLowerCase();
+}
+
+function directConfigured(env: Env) {
+  return Boolean(
+    env.META_APP_SECRET
+    && env.META_VERIFY_TOKEN
+    && directAllowedUsername(env)
+    && metaConnected(env),
+  );
+}
+
+async function verifyMetaWebhookSignature(
+  body: ArrayBuffer,
+  signatureHeader: string | null,
+  secret: string | undefined,
+) {
+  if (!secret || !signatureHeader?.startsWith("sha256=")) return false;
+  const suppliedHex = signatureHeader.slice("sha256=".length).toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(suppliedHex)) return false;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const expected = new Uint8Array(await crypto.subtle.sign("HMAC", key, body));
+  const supplied = Uint8Array.from(
+    suppliedHex.match(/.{2}/g) || [],
+    (value) => Number.parseInt(value, 16),
+  );
+  if (supplied.length !== expected.length) return false;
+  let difference = 0;
+  for (let index = 0; index < expected.length; index += 1) {
+    difference |= expected[index] ^ supplied[index];
+  }
+  return difference === 0;
+}
+
+function instagramWebhookMessages(payload: InstagramWebhookPayload) {
+  if (payload.object !== "instagram" || !Array.isArray(payload.entry)) return [];
+  return payload.entry.flatMap((entry) => Array.isArray(entry.messaging) ? entry.messaging : []);
+}
+
+function directSharedReelUrl(message: InstagramWebhookMessage["message"]) {
+  const textUrl = findInstagramUrl(message?.text || "");
+  if (textUrl) return textUrl;
+  for (const attachment of message?.attachments || []) {
+    if (!new Set(["ig_reel", "reel"]).has((attachment.type || "").toLowerCase())) continue;
+    const candidate = attachment.payload?.url;
+    if (typeof candidate !== "string") continue;
+    const reelUrl = findInstagramUrl(candidate);
+    if (reelUrl) return reelUrl;
+    try {
+      const url = new URL(candidate);
+      const host = url.hostname.toLowerCase();
+      const trustedMediaHost = host === "instagram.com"
+        || host.endsWith(".instagram.com")
+        || host.endsWith(".cdninstagram.com")
+        || host.endsWith(".fbcdn.net");
+      if (url.protocol === "https:" && trustedMediaHost) return url.toString();
+    } catch {
+      // Ignore malformed attachment URLs even when the webhook itself is authentic.
+    }
+  }
+  return null;
+}
+
+async function instagramDirectProfile(senderId: string, env: Env) {
+  const credentials = await instagramCredentials(env);
+  const params = new URLSearchParams({
+    fields: "username",
+    access_token: credentials.accessToken,
+  });
+  const response = await fetch(
+    `${metaBaseUrl(env)}/${encodeURIComponent(senderId)}?${params.toString()}`,
+  );
+  const result = await response.json() as {
+    id?: string;
+    username?: string;
+    error?: { message?: string };
+  };
+  if (!response.ok || result.error) {
+    throw new Error(result.error?.message || "A Meta não confirmou o remetente do Direct.");
+  }
+  return {
+    id: result.id || senderId,
+    username: (result.username || "").replace(/^@+/, "").toLowerCase(),
+  };
+}
+
+async function authorizedDirectSender(senderId: string, env: Env) {
+  const senderKey = `instagram:${senderId}`;
+  const paired = await env.DB.prepare(
+    "SELECT sender_id FROM authorized_senders WHERE sender_id = ?",
+  ).bind(senderKey).first<{ sender_id: string }>();
+  if (paired) return true;
+  const allowedUsername = directAllowedUsername(env);
+  if (!allowedUsername) return false;
+  const profile = await instagramDirectProfile(senderId, env);
+  if (profile.username !== allowedUsername) return false;
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO authorized_senders (sender_id, paired_at) VALUES (?, CURRENT_TIMESTAMP)",
+  ).bind(senderKey).run();
+  return true;
+}
+
+async function sendInstagramDirectMessage(
+  senderId: string,
+  message: Record<string, unknown>,
+  env: Env,
+) {
+  const credentials = await instagramCredentials(env);
+  const response = await fetch(
+    `${metaBaseUrl(env)}/${encodeURIComponent(credentials.userId)}/messages`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${credentials.accessToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        recipient: { id: senderId },
+        messaging_type: "RESPONSE",
+        message,
+      }),
+    },
+  );
+  const result = await response.json() as {
+    message_id?: string;
+    error?: { message?: string; code?: number };
+  };
+  if (!response.ok || result.error) {
+    const details = result.error?.code ? ` (Meta ${result.error.code})` : "";
+    throw new Error(`${result.error?.message || "A Meta não enviou a resposta no Direct."}${details}`);
+  }
+  return result;
+}
+
+async function subscribeInstagramDirect(env: Env) {
+  const credentials = await instagramCredentials(env);
+  const response = await fetch(
+    `${metaBaseUrl(env)}/${encodeURIComponent(credentials.userId)}/subscribed_apps`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${credentials.accessToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        subscribed_fields: ["messages", "messaging_postbacks"],
+      }),
+    },
+  );
+  const result = await response.json() as {
+    success?: boolean;
+    error?: { message?: string; code?: number };
+  };
+  if (!response.ok || result.error || result.success !== true) {
+    const details = result.error?.code ? ` (Meta ${result.error.code})` : "";
+    throw new Error(`${result.error?.message || "A Meta não ativou os eventos do Direct."}${details}`);
+  }
+  return { subscribed: true };
+}
+
+async function requestDirectRights(senderId: string, reelId: number, env: Env) {
+  return sendInstagramDirectMessage(senderId, {
+    text: `Reel #${reelId} recebido. Confirme a autorização para baixar e preparar o conteúdo:`,
+    quick_replies: [
+      {
+        content_type: "text",
+        title: "Conteúdo próprio",
+        payload: `reelvolt:rights:owned:${reelId}`,
+      },
+      {
+        content_type: "text",
+        title: "Licenciado",
+        payload: `reelvolt:rights:licensed:${reelId}`,
+      },
+    ],
+  }, env);
+}
+
+async function sendDirectApprovalButton(
+  senderId: string,
+  reelId: number,
+  baseUrl: string,
+  env: Env,
+) {
+  return sendInstagramDirectMessage(senderId, {
+    attachment: {
+      type: "template",
+      payload: {
+        template_type: "button",
+        text: `O MP4 do Reel #${reelId} está pronto. Revise e autorize a publicação no ReelVolt.`,
+        buttons: [{
+          type: "web_url",
+          url: `${baseUrl}/?approve=${reelId}`,
+          title: "Abrir no ReelVolt",
+        }],
+      },
+    },
+  }, env);
+}
+
+function directSenderId(record: ReelRecord) {
+  return record.sender_id.startsWith("instagram:")
+    ? record.sender_id.slice("instagram:".length)
+    : null;
+}
+
 function insightValue(result: InstagramInsightResult | undefined) {
   const value = result?.total_value?.value ?? result?.values?.[0]?.value ?? 0;
   return Number.isFinite(Number(value)) ? Math.max(0, Math.round(Number(value))) : 0;
@@ -1056,7 +1301,7 @@ async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
   }
 }
 
-async function processReel(record: ReelRecord, env: Env) {
+async function processReel(record: ReelRecord, env: Env, baseUrl?: string) {
   try {
     await env.DB.prepare("UPDATE reels SET status = 'downloading', error = NULL WHERE id = ?")
       .bind(record.id).run();
@@ -1085,17 +1330,35 @@ async function processReel(record: ReelRecord, env: Env) {
       WHERE id = ?`)
       .bind(storageKey, `reel-${record.id}.mp4`, "video/mp4", stored?.size ?? null, publishStatus, record.id)
       .run();
+    const senderId = directSenderId(record);
+    if (senderId && baseUrl) {
+      try {
+        await sendDirectApprovalButton(senderId, record.id, baseUrl, env);
+      } catch (notificationError) {
+        console.warn(`O Reel #${record.id} ficou pronto, mas o Direct não recebeu o botão de aprovação.`, notificationError);
+      }
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Falha desconhecida";
     await env.DB.prepare(`UPDATE reels SET status = 'failed', error = ?,
       publish_status = CASE WHEN publication_mode = 'download_only' THEN 'not_requested' ELSE 'blocked' END
       WHERE id = ?`)
       .bind(message.slice(0, 500), record.id).run();
+    const senderId = directSenderId(record);
+    if (senderId) {
+      try {
+        await sendInstagramDirectMessage(senderId, {
+          text: `Não foi possível preparar o Reel #${record.id}. Abra o ReelVolt para conferir o erro.`,
+        }, env);
+      } catch (notificationError) {
+        console.warn(`A falha do Reel #${record.id} também não pôde ser avisada no Direct.`, notificationError);
+      }
+    }
   }
 }
 
 async function reelById(id: number, env: Env) {
-  return env.DB.prepare(`SELECT id, source_url, rules, source_account, rights_confirmed, public_token,
+  return env.DB.prepare(`SELECT id, sender_id, source_url, rules, source_account, rights_confirmed, public_token,
     storage_key, filename, content_type, status, publication_mode, share_to_feed, caption,
     caption_enabled, cover_mode, cover_key, approved_at, scheduled_for,
     publish_status, instagram_container_id, publish_requested_at, created_at
@@ -1174,7 +1437,9 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
     return { queued: false, scheduledFor: null, youtube };
   }
 
-  if (settings.auto_publish_enabled) {
+  const usesScheduledQueue = Boolean(settings.auto_publish_enabled)
+    || record.sender_id.startsWith("instagram:");
+  if (usesScheduledQueue) {
     const scheduledFor = await nextPublicationTime(env, settings.publish_interval_minutes);
     await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
       caption_enabled = ?, cover_mode = ?, cover_key = ?, approved_at = CURRENT_TIMESTAMP,
@@ -1249,7 +1514,7 @@ async function queueReel(
   ).run();
   if (!result.meta.changes) return { accepted: false, reason: "duplicate" };
 
-  const record = await env.DB.prepare(`SELECT id, source_url, rules, source_account, rights_confirmed,
+  const record = await env.DB.prepare(`SELECT id, sender_id, source_url, rules, source_account, rights_confirmed,
     public_token, storage_key, filename, content_type, status, publication_mode, share_to_feed,
     caption, caption_enabled, cover_mode, cover_key, approved_at, scheduled_for,
     publish_status, instagram_container_id, publish_requested_at, created_at
@@ -1303,7 +1568,7 @@ async function serveCover(
 }
 
 async function listReels(env: Env, baseUrl: string) {
-  const { results } = await env.DB.prepare(`SELECT r.id, r.source_url, r.rules, r.source_account,
+  const { results } = await env.DB.prepare(`SELECT r.id, r.sender_id, r.source_url, r.rules, r.source_account,
     r.rights_confirmed, r.public_token, r.storage_key, r.filename, r.content_type, r.size_bytes,
     r.status, r.error, r.publication_mode, r.share_to_feed, r.caption, r.caption_enabled,
     r.cover_mode, r.cover_key, r.approved_at, r.scheduled_for, r.publish_status, r.publish_error,
@@ -1326,6 +1591,9 @@ async function listReels(env: Env, baseUrl: string) {
       : null,
     public_token: undefined,
     storage_key: undefined,
+    sender_id: undefined,
+    rights_confirmed: Boolean(row.rights_confirmed),
+    intake_source: row.sender_id.startsWith("instagram:") ? "instagram_direct" : "web",
     instagram_selected: Boolean(row.instagram_selected),
     youtube_selected: Boolean(row.youtube_selected),
     made_for_kids: Boolean(row.made_for_kids),
@@ -1471,6 +1739,10 @@ async function dashboard(env: Env, baseUrl: string) {
     },
     settings: {
       meta_connected: metaConnected(env),
+      direct_configured: directConfigured(env),
+      direct_allowed_username: directAllowedUsername(env)
+        ? `@${directAllowedUsername(env)}`
+        : null,
       resolver_connected: Boolean(env.REEL_RESOLVER_URL),
       ...settingsPayload(preferences, baseUrl),
       account: "@btsupply_",
@@ -1668,14 +1940,178 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
   };
 }
 
+async function receiveDirectReel(
+  senderId: string,
+  messageId: string,
+  sourceUrl: string,
+  env: Env,
+  baseUrl: string,
+) {
+  const existing = await env.DB.prepare(`SELECT id, status FROM reels
+    WHERE source_url = ? AND status <> 'failed' ORDER BY id DESC LIMIT 1`)
+    .bind(sourceUrl).first<{ id: number; status: string }>();
+  if (existing) {
+    if (existing.status === "ready") {
+      await sendDirectApprovalButton(senderId, existing.id, baseUrl, env);
+    } else if (existing.status === "awaiting_rights") {
+      await requestDirectRights(senderId, existing.id, env);
+    } else {
+      await sendInstagramDirectMessage(senderId, {
+        text: `Esse Reel já está registrado como #${existing.id} e continua em processamento.`,
+      }, env);
+    }
+    return existing.id;
+  }
+
+  await env.DB.prepare(`INSERT OR IGNORE INTO reels
+    (message_id, sender_id, source_url, rules, source_account, rights_confirmed, public_token,
+      status, publication_mode, share_to_feed, caption, publish_status)
+    VALUES (?, ?, ?, 'fixed_cover_caption', NULL, 0, ?, 'awaiting_rights',
+      'approval', 1, ?, 'not_requested')`)
+    .bind(
+      `instagram:${messageId}`,
+      `instagram:${senderId}`,
+      sourceUrl,
+      crypto.randomUUID(),
+      FIXED_CAPTION,
+    )
+    .run();
+  const row = await env.DB.prepare(
+    "SELECT id FROM reels WHERE message_id = ?",
+  ).bind(`instagram:${messageId}`).first<{ id: number }>();
+  if (!row?.id) {
+    throw new Error("O Reel recebido pelo Direct não pôde ser registrado.");
+  }
+  await requestDirectRights(senderId, row.id, env);
+  return row.id;
+}
+
+async function confirmDirectRights(
+  senderId: string,
+  reelId: number,
+  rightsBasis: "owned" | "licensed",
+  env: Env,
+  baseUrl: string,
+) {
+  const expectedSender = `instagram:${senderId}`;
+  const current = await env.DB.prepare(`SELECT id, status, rights_confirmed FROM reels
+    WHERE id = ? AND sender_id = ?`)
+    .bind(reelId, expectedSender)
+    .first<{ id: number; status: string; rights_confirmed: number }>();
+  if (!current) return;
+
+  if (current.rights_confirmed) {
+    if (current.status === "ready") {
+      await sendDirectApprovalButton(senderId, reelId, baseUrl, env);
+    } else {
+      await sendInstagramDirectMessage(senderId, {
+        text: `Os direitos do Reel #${reelId} já foram confirmados. O MP4 continua sendo preparado.`,
+      }, env);
+    }
+    return;
+  }
+  if (current.status !== "awaiting_rights") return;
+
+  await createContentTargets(reelId, {
+    instagramEnabled: true,
+    youtubeEnabled: false,
+    rightsBasis,
+    context: `Recebido por Instagram Direct de @${directAllowedUsername(env)}.`,
+    madeForKids: false,
+    containsSyntheticMedia: false,
+    paidProductPlacement: false,
+  }, env);
+  const claimed = await env.DB.prepare(`UPDATE reels SET rights_confirmed = 1,
+    status = 'queued', publish_status = 'awaiting_download', error = NULL
+    WHERE id = ? AND sender_id = ? AND status = 'awaiting_rights' AND rights_confirmed = 0`)
+    .bind(reelId, expectedSender)
+    .run();
+  if (!claimed.meta.changes) return;
+  const record = await reelById(reelId, env);
+  if (!record) throw new Error("O Reel confirmado no Direct não pôde ser recarregado.");
+  await sendInstagramDirectMessage(senderId, {
+    text: `Autorização registrada para o Reel #${reelId}. O MP4 será baixado e preparado agora.`,
+  }, env);
+  await processReel(record, env, baseUrl);
+}
+
+async function handleInstagramDirectWebhook(
+  payload: InstagramWebhookPayload,
+  env: Env,
+  baseUrl: string,
+) {
+  for (const event of instagramWebhookMessages(payload)) {
+    try {
+      const message = event.message;
+      const senderId = event.sender?.id || "";
+      const recipientId = event.recipient?.id || "";
+      const messageId = message?.mid || "";
+      if (!message || !senderId || !messageId || message.is_echo) continue;
+      if (env.INSTAGRAM_USER_ID && recipientId && recipientId !== env.INSTAGRAM_USER_ID) continue;
+      if (!await authorizedDirectSender(senderId, env)) continue;
+
+      const rightsMatch = (message.quick_reply?.payload || "").match(DIRECT_RIGHTS_PAYLOAD);
+      if (rightsMatch) {
+        const rightsBasis = rightsMatch[1] === "licensed" ? "licensed" : "owned";
+        await confirmDirectRights(senderId, Number(rightsMatch[2]), rightsBasis, env, baseUrl);
+        continue;
+      }
+
+      const sourceUrl = directSharedReelUrl(message);
+      if (sourceUrl) {
+        await receiveDirectReel(senderId, messageId, sourceUrl, env, baseUrl);
+      }
+    } catch (error) {
+      console.error("Falha ao processar um evento assinado do Instagram Direct.", error);
+    }
+  }
+}
+
 async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<Response | null> {
   const url = new URL(request.url);
+  const instagramWebhookRoute = url.pathname === "/webhooks/instagram";
   const isPublicDownload = /^\/download\/[0-9a-f-]{36}$/i.test(url.pathname);
   const publishMediaMatch = url.pathname.match(/^\/publish-media\/(\d+)\.mp4$/);
   const publishCoverMatch = url.pathname.match(/^\/publish-cover\/(\d+)\.jpg$/);
   const workerMediaRoute = /^\/worker-media\/\d+\.mp4$/.test(url.pathname);
-  if (!url.pathname.startsWith("/api/") && !isPublicDownload && !publishMediaMatch
-    && !publishCoverMatch && !workerMediaRoute) return null;
+  if (!url.pathname.startsWith("/api/") && !instagramWebhookRoute && !isPublicDownload
+    && !publishMediaMatch && !publishCoverMatch && !workerMediaRoute) return null;
+
+  if (instagramWebhookRoute && request.method === "GET") {
+    const mode = url.searchParams.get("hub.mode");
+    const token = url.searchParams.get("hub.verify_token");
+    const challenge = url.searchParams.get("hub.challenge");
+    if (mode === "subscribe" && challenge && env.META_VERIFY_TOKEN && token === env.META_VERIFY_TOKEN) {
+      return new Response(challenge, {
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
+          "cache-control": "no-store",
+          "x-content-type-options": "nosniff",
+        },
+      });
+    }
+    return json({ error: "Verificação do webhook recusada." }, { status: 403 });
+  }
+
+  if (instagramWebhookRoute && request.method === "POST") {
+    const rawBody = await request.arrayBuffer();
+    const validSignature = await verifyMetaWebhookSignature(
+      rawBody,
+      request.headers.get("x-hub-signature-256"),
+      env.META_APP_SECRET,
+    );
+    if (!validSignature) return json({ error: "Assinatura do webhook inválida." }, { status: 401 });
+    let payload: InstagramWebhookPayload;
+    try {
+      payload = JSON.parse(new TextDecoder().decode(rawBody)) as InstagramWebhookPayload;
+    } catch {
+      return json({ error: "Corpo do webhook inválido." }, { status: 400 });
+    }
+    await ensureDatabase(env);
+    const baseUrl = publicBaseUrl(request.url, env);
+    ctx.waitUntil(handleInstagramDirectWebhook(payload, env, baseUrl));
+    return json({ received: true });
+  }
 
   await ensureDatabase(env);
   const baseUrl = publicBaseUrl(request.url, env);
@@ -1753,6 +2189,17 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       await reschedulePublicationQueue(env, interval);
     }
     return json({ settings: settingsPayload(await studioSettings(env), baseUrl) });
+  }
+
+  if (url.pathname === "/api/instagram/direct/subscribe" && request.method === "POST") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    if (!directConfigured(env)) {
+      return json({
+        error: "Configure o segredo do aplicativo, o token de verificação e o remetente autorizado antes de ativar o Direct.",
+      }, { status: 503 });
+    }
+    return json(await subscribeInstagramDirect(env));
   }
 
   if (url.pathname === "/api/studio-settings/cover" && request.method === "GET") {

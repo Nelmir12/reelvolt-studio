@@ -303,6 +303,27 @@ select:focus-visible {
   width: 100%;
 }
 
+.direct-connection-card {
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.direct-connection-card button {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.direct-connection-card button:disabled {
+  cursor: wait;
+  opacity: .6;
+}
+
 .channel-connections a {
   color: var(--accent);
   font-size: 0.78rem;
@@ -572,6 +593,15 @@ select:focus-visible {
   height: 17px;
   margin: 0;
   accent-color: var(--accent);
+}
+
+.direct-rights-confirmed {
+  border: 1px solid color-mix(in srgb, var(--success) 35%, var(--line));
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--success-soft);
+  color: var(--text);
+  cursor: default;
 }
 
 .primary-button,

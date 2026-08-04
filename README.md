@@ -7,11 +7,15 @@ vídeos e as capas.
 
 ## Fluxo
 
-1. O usuário envia ou compartilha um link de Reel pelo PWA.
-2. O site valida o usuário, a URL e a confirmação dos direitos de uso.
+1. O usuário compartilha um Reel pelo PWA ou envia o Reel de `@nelmirjr` para o
+   Direct de `@btsupply_`.
+2. O site valida o usuário, a URL, a assinatura da Meta e a confirmação dos
+   direitos de uso. No Direct, somente o identificador vinculado a `@nelmirjr`
+   é aceito.
 3. O MP4 é obtido diretamente ou por um resolvedor privado/licenciado e fica
    armazenado uma única vez no R2.
-4. O usuário pode somente baixar o arquivo ou prepará-lo para aprovação.
+4. O usuário pode somente baixar o arquivo ou prepará-lo para aprovação. No
+   fluxo do Direct, recebe um botão que abre exatamente o Reel preparado.
 5. Após a aprovação explícita, o Reel é publicado pela API oficial da Meta,
    imediatamente ou pela fila configurada.
 6. Os Insights oficiais alimentam o dashboard e o histórico de métricas.
@@ -35,15 +39,22 @@ As variáveis estão documentadas em `.env.example`:
 - `INSTAGRAM_API_VERSION`: versão ativa configurada no aplicativo da Meta.
 - `INSTAGRAM_USER_ID`: ID profissional da conta que receberá os Reels.
 - `INSTAGRAM_ACCESS_TOKEN`: token com permissão de publicação e Insights.
+- `INSTAGRAM_DIRECT_ALLOWED_USERNAME`: único usuário autorizado a enviar pelo
+  Direct (atualmente `nelmirjr`).
+- `META_APP_SECRET`: segredo usado para validar `X-Hub-Signature-256`.
+- `META_VERIFY_TOKEN`: segredo usado pela Meta ao validar o callback.
 - `PUBLISH_URL_SECRET`: assina URLs temporárias consumidas pela Meta.
 
 Com Instagram Login, o token precisa das permissões
-`instagram_business_basic`, `instagram_business_content_publish` e
-`instagram_business_manage_insights`.
+`instagram_business_basic`, `instagram_business_content_publish`,
+`instagram_business_manage_insights` e `instagram_business_manage_messages`.
 
 ## Rotas principais
 
 - `GET /`: painel autenticado.
+- `GET|POST /webhooks/instagram`: validação e eventos assinados do Direct.
+- `POST /api/instagram/direct/subscribe`: ativa `messages` e
+  `messaging_postbacks` para a conta profissional.
 - `POST /api/reels/intake`: recebe um Reel e as opções do fluxo.
 - `GET /api/reels`: lista os registros recentes.
 - `GET /api/dashboard`: retorna métricas e estado do Instagram.
@@ -88,3 +99,6 @@ Para continuar o projeto em outra máquina, consulte
 - Não altere o `project_id` em `.openai/hosting.json`.
 - Não remova tabelas do D1 nem objetos do R2 como efeito colateral.
 - Nunca publique um Reel sem aprovação explícita para aquele item.
+- Nunca aceite um evento do Direct sem assinatura HMAC válida; o primeiro
+  evento autorizado confere o username e fixa o Instagram-scoped ID de
+  `@nelmirjr` no D1.

@@ -27,6 +27,8 @@ type Reel = {
   completed_at: string | null;
   published_at: string | null;
   instagram_selected: boolean;
+  rights_confirmed: boolean;
+  intake_source: "instagram_direct" | "web";
   rights_basis: "owned" | "licensed" | null;
   content_context: string | null;
   made_for_kids: boolean;
@@ -47,6 +49,8 @@ type Dashboard = {
   };
   settings: {
     meta_connected: boolean;
+    direct_configured: boolean;
+    direct_allowed_username: string | null;
     resolver_connected: boolean;
     cover_url: string;
     caption: string;
@@ -71,6 +75,7 @@ const INSTAGRAM_URL = /https?:\/\/(?:www\.)?instagram\.com\/(?:reel|reels|p)\/[A
 const REELS_PER_PAGE = 6;
 
 const DOWNLOAD_LABELS: Record<string, string> = {
+  awaiting_rights: "Aguardando direitos",
   queued: "Na fila",
   downloading: "Baixando",
   ready: "MP4 pronto",
@@ -161,6 +166,8 @@ const EMPTY_DASHBOARD: Dashboard = {
   },
   settings: {
     meta_connected: false,
+    direct_configured: false,
+    direct_allowed_username: null,
     resolver_connected: false,
     cover_url: "/reel-cover.jpg",
     caption: "V arrived at #VogueWorld: Hollywood in unmistakable style, enjoying the live performances while showcasing the effortless elegance he's become known for. Another runway-worthy moment. #Taehyung",
@@ -227,10 +234,13 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
   const [autoPublishEnabled, setAutoPublishEnabled] = useState(false);
   const [publishIntervalMinutes, setPublishIntervalMinutes] = useState(60);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [activatingDirect, setActivatingDirect] = useState(false);
+  const [directActivated, setDirectActivated] = useState(false);
   const [notice, setNotice] = useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
   const [activeView, setActiveView] = useState<"inbox" | "dashboard">(initialView);
   const [reelPage, setReelPage] = useState(1);
   const settingsInitialized = useRef(false);
+  const approvalLinkHandled = useRef(false);
   const reelPageCount = Math.max(1, Math.ceil(reels.length / REELS_PER_PAGE));
   const currentReelPage = Math.min(reelPage, reelPageCount);
   const visibleReels = useMemo(
@@ -277,8 +287,35 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
   }, [loadData]);
 
   useEffect(() => {
+    if (approvalLinkHandled.current || !reels.length) return;
+    const reelId = Number(new URLSearchParams(window.location.search).get("approve"));
+    if (!Number.isInteger(reelId) || reelId <= 0) return;
+    const reel = reels.find((candidate) => candidate.id === reelId && candidate.status === "ready");
+    if (!reel) return;
+    approvalLinkHandled.current = true;
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.delete("approve");
+    window.history.replaceState({}, "", `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+    const openDialog = window.setTimeout(() => {
+      setActiveView("inbox");
+      setReelPage(Math.max(1, Math.ceil((reels.indexOf(reel) + 1) / REELS_PER_PAGE)));
+      setApprovalDraft({
+        reel,
+        instagram: reel.publish_status !== "published" && reel.instagram_selected,
+        rightsBasis: reel.rights_basis || "licensed",
+        context: reel.content_context || "",
+        madeForKids: reel.made_for_kids,
+        containsSyntheticMedia: reel.contains_synthetic_media,
+        paidProductPlacement: reel.paid_product_placement,
+        rightsConfirmed: reel.intake_source === "instagram_direct" && reel.rights_confirmed,
+      });
+    }, 0);
+    return () => window.clearTimeout(openDialog);
+  }, [reels]);
+
+  useEffect(() => {
     const activeStatuses = new Set([
-      "queued", "downloading", "creating", "processing", "publishing", "preflight",
+      "awaiting_rights", "queued", "downloading", "creating", "processing", "publishing", "preflight",
       "analyzing", "uploading", "retrying", "awaiting_metadata",
     ]);
     const hasActiveWork = reels.some((reel) =>
@@ -361,8 +398,36 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
       madeForKids: reel.made_for_kids,
       containsSyntheticMedia: reel.contains_synthetic_media,
       paidProductPlacement: reel.paid_product_placement,
-      rightsConfirmed: false,
+      rightsConfirmed: reel.intake_source === "instagram_direct" && reel.rights_confirmed,
     });
+  }
+
+  async function activateDirect() {
+    setActivatingDirect(true);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/instagram/direct/subscribe", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+      const data = await response.json() as { subscribed?: boolean; error?: string };
+      if (!response.ok || !data.subscribed) {
+        throw new Error(data.error || "Não foi possível ativar os eventos do Direct.");
+      }
+      setDirectActivated(true);
+      setNotice({
+        tone: "success",
+        text: `Direct ativado. Somente ${dashboard.settings.direct_allowed_username} poderá enviar Reels.`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Não foi possível ativar o Direct.",
+      });
+    } finally {
+      setActivatingDirect(false);
+    }
   }
 
   async function publish(draft: ApprovalDraft) {
@@ -529,6 +594,22 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
               <strong>{dashboard.settings.meta_connected ? "Instagram conectado" : "Instagram aguardando conexão"}</strong>
               <small>{dashboard.settings.meta_connected ? "API oficial da Meta" : "Publicação fica aguardando autorização"}</small>
             </div>
+          </div>
+          <div className="connection-card direct-connection-card">
+            <span className={`connection-dot ${directActivated ? "online" : ""}`} />
+            <div>
+              <strong>{directActivated ? "Direct ativado" : "Entrada pelo Direct"}</strong>
+              <small>
+                {dashboard.settings.direct_configured
+                  ? `Restrita a ${dashboard.settings.direct_allowed_username}`
+                  : "Aguardando configuração segura na Meta"}
+              </small>
+            </div>
+            {dashboard.settings.direct_configured && !directActivated ? (
+              <button type="button" onClick={() => void activateDirect()} disabled={activatingDirect}>
+                {activatingDirect ? "Ativando…" : "Ativar eventos"}
+              </button>
+            ) : null}
           </div>
         </div>
       </section>
@@ -777,6 +858,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                   <div className="reel-main">
                     <div className="reel-topline">
                       <strong>#{reel.id} · {reel.source_account || "Origem não informada"}</strong>
+                      {reel.intake_source === "instagram_direct" ? <small>Recebido pelo Direct</small> : null}
                       <span>Recebido {formatDate(reel.created_at)}</span>
                     </div>
                     <div className="reel-timeline" aria-label={`Datas do Reel ${reel.id}`}>
@@ -972,23 +1054,32 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
               </label>
             </div>
 
-            <label className="rights-check">
-              <input
-                type="checkbox"
-                checked={approvalDraft.rightsConfirmed}
-                onChange={(event) => setApprovalDraft((current) =>
-                  current ? { ...current, rightsConfirmed: event.target.checked } : current)}
-                required
-              />
-              <span>Confirmo os direitos e aprovo a publicação do Reel #{approvalDraft.reel.id} no Instagram.</span>
-            </label>
+            {approvalDraft.reel.intake_source === "instagram_direct" && approvalDraft.reel.rights_confirmed ? (
+              <div className="rights-check direct-rights-confirmed">
+                <span>
+                  Direitos confirmados no Direct por {dashboard.settings.direct_allowed_username}. O botão abaixo é
+                  a autorização final para publicar este Reel no Instagram.
+                </span>
+              </div>
+            ) : (
+              <label className="rights-check">
+                <input
+                  type="checkbox"
+                  checked={approvalDraft.rightsConfirmed}
+                  onChange={(event) => setApprovalDraft((current) =>
+                    current ? { ...current, rightsConfirmed: event.target.checked } : current)}
+                  required
+                />
+                <span>Confirmo os direitos e aprovo a publicação do Reel #{approvalDraft.reel.id} no Instagram.</span>
+              </label>
+            )}
 
             <div className="approval-actions">
               <button type="button" className="action-secondary" onClick={() => setApprovalDraft(null)}>
                 Cancelar
               </button>
               <button type="submit" className="action-primary" disabled={publishingId === approvalDraft.reel.id}>
-                {publishingId === approvalDraft.reel.id ? "Aprovando…" : "Aprovar Instagram"}
+                {publishingId === approvalDraft.reel.id ? "Aprovando…" : "Autorizar publicação"}
               </button>
             </div>
           </form>

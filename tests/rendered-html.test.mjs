@@ -47,7 +47,7 @@ test("server-renders the authenticated Reel Inbox", async () => {
   assert.match(html, /reelvolt-icon-192\.png/);
   assert.doesNotMatch(html, /Baixe\. Aprove\.|Um fluxo único|Reel Inbox<\/span>/i);
   assert.doesNotMatch(html, /Notion/);
-  assert.doesNotMatch(html, /Telegram|Direct do Instagram|codex-preview|Building your site/i);
+  assert.doesNotMatch(html, /Telegram|codex-preview|Building your site/i);
 });
 
 test("server-renders the analytics dashboard tab", async () => {
@@ -98,6 +98,14 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(worker, /processPublicationQueue/);
   assert.match(worker, /publish-cover/);
   assert.match(worker, /PUBLISH_URL_SECRET/);
+  assert.match(worker, /\/webhooks\/instagram/);
+  assert.match(worker, /x-hub-signature-256/i);
+  assert.match(worker, /DIRECT_RIGHTS_PAYLOAD/);
+  assert.match(worker, /INSTAGRAM_DIRECT_ALLOWED_USERNAME/);
+  assert.match(worker, /sendDirectApprovalButton/);
+  assert.match(worker, /instagram_business_manage_messages|subscribed_fields/);
+  assert.match(worker, /messaging_type: "RESPONSE"/);
+  assert.match(worker, /record\.sender_id\.startsWith\("instagram:"\)/);
   assert.match(worker, /destinations/);
   assert.match(youtube, /YOUTUBE_PUBLISHING_ENABLED = false/);
   assert.match(youtube, /youtube_publishing_retired/);
@@ -108,6 +116,8 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(inbox, /const REELS_PER_PAGE = 6/);
   assert.match(inbox, /visibleReels\.map/);
   assert.match(inbox, /Aprovar para a fila/);
+  assert.match(inbox, /Autorizar publicação/);
+  assert.match(inbox, /Recebido pelo Direct/);
   assert.match(inbox, /APROVAÇÃO DO INSTAGRAM/);
   assert.match(inbox, /MP4 pronto/);
   assert.match(inbox, /Publicado no Instagram/);
@@ -122,4 +132,6 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(analytics, /Últimos 30 dias/);
   assert.match(readme, /resolvedor privado\/licenciado/);
   assert.match(readme, /experimento de publicação no YouTube foi retirado/);
+  assert.match(readme, /instagram_business_manage_messages/);
+  assert.match(readme, /X-Hub-Signature-256/);
 });

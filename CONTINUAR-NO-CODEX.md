@@ -52,11 +52,14 @@ da Meta e do resolvedor podem aparecer desconectados localmente.
 ## 5. Arquitetura atual
 
 - O fluxo operacional publica somente no Instagram pela API oficial da Meta.
+- O Direct do Instagram é uma entrada ativa: somente `@nelmirjr` pode enviar
+  Reels para `@btsupply_`; a confirmação de direitos ocorre no Direct e a
+  autorização final de publicação ocorre no ReelVolt.
 - O D1 guarda estados, preferências e Insights.
 - O R2 guarda vídeos e capas.
 - O histórico do experimento do YouTube permanece preservado, mas suas rotas,
   interface e executor estão desativados.
-- Notion, Telegram e Direct do Instagram não fazem parte do fluxo.
+- Notion e Telegram não fazem parte do fluxo.
 
 ## 6. Segurança
 
