@@ -92,6 +92,8 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(worker, /instagram_insight_sync/);
   assert.match(worker, /Math\.min\(6, results\.length\)/);
   assert.match(worker, /already_running/);
+  assert.match(worker, /result\.total > 0 && result\.updated === 0/);
+  assert.match(worker, /A Meta não retornou métricas para os Reels publicados/);
   const analyticsRoute = worker.slice(
     worker.indexOf('url.pathname === \"\/api\/analytics\"'),
     worker.indexOf('url.pathname === \"\/api\/reels\/intake\"'),

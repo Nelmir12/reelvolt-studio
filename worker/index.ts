@@ -1016,6 +1016,7 @@ async function mediaInsightRequest(
 
 async function saveInsightError(reelId: number, error: unknown, env: Env) {
   const message = error instanceof Error ? error.message : "Falha desconhecida ao consultar os Insights.";
+  console.warn(`Falha ao atualizar os Insights do Reel #${reelId}: ${message.slice(0, 500)}`);
   await env.DB.prepare(`INSERT INTO reel_insights (reel_id, last_error, updated_at)
     VALUES (?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(reel_id) DO UPDATE SET last_error = excluded.last_error,
@@ -1224,6 +1225,12 @@ async function executeClaimedInsightRefresh(env: Env) {
     await env.DB.prepare(`UPDATE instagram_insight_sync SET total_targets = ?,
       updated_at = CURRENT_TIMESTAMP WHERE id = 1`).bind(Number(total?.total || 0)).run();
     const result = await refreshAllInsights(env);
+    if (result.total > 0 && result.updated === 0) {
+      const latestFailure = await env.DB.prepare(`SELECT last_error FROM reel_insights
+        WHERE last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 1`)
+        .first<{ last_error: string }>();
+      throw new Error(latestFailure?.last_error || "A Meta não retornou métricas para os Reels publicados.");
+    }
     await env.DB.prepare(`UPDATE instagram_insight_sync SET status = 'idle',
       completed_at = CURRENT_TIMESTAMP, last_error = NULL, total_targets = ?,
       updated_targets = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`)
