@@ -1133,7 +1133,7 @@ async function refreshReelInsights(target: PublishedReelInsightTarget, env: Env)
       env.DB.prepare(`INSERT INTO reel_insight_snapshots
         (reel_id, captured_date, views, reach, total_interactions, shares, saved,
           average_watch_time_ms, milestone, captured_minutes, captured_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(reel_id, captured_date) DO UPDATE SET views = excluded.views,
           reach = excluded.reach, total_interactions = excluded.total_interactions,
           shares = excluded.shares, saved = excluded.saved,
