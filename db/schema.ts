@@ -105,6 +105,17 @@ export const reelInsightSnapshots = sqliteTable("reel_insight_snapshots", {
   index("reel_insight_snapshots_reel_idx").on(table.reelId, table.capturedAt),
 ]);
 
+export const instagramInsightSync = sqliteTable("instagram_insight_sync", {
+  id: integer("id").primaryKey(),
+  status: text("status").notNull().default("idle"),
+  startedAt: text("started_at"),
+  completedAt: text("completed_at"),
+  lastError: text("last_error"),
+  totalTargets: integer("total_targets").notNull().default(0),
+  updatedTargets: integer("updated_targets").notNull().default(0),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
 export const youtubeAuth = sqliteTable("youtube_auth", {
   id: integer("id").primaryKey(),
   refreshTokenCipher: text("refresh_token_cipher").notNull(),

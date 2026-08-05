@@ -7,8 +7,6 @@ import {
   handleYouTubeRequest,
   publicationDestinations,
   queueYouTubePublication,
-  refreshYouTubeInsights,
-  youtubeAnalyticsPayload,
   youtubeConnection,
   youtubeSummaries,
   type ContentTargetInput,
@@ -310,6 +308,16 @@ const REEL_INSIGHT_SNAPSHOT_COLUMNS: Record<string, string> = {
 };
 const CREATE_REEL_INSIGHTS_MILESTONE_INDEX =
   "CREATE UNIQUE INDEX IF NOT EXISTS reel_insight_snapshots_milestone_idx ON reel_insight_snapshots (reel_id, milestone)";
+const CREATE_INSTAGRAM_INSIGHT_SYNC = `CREATE TABLE IF NOT EXISTS instagram_insight_sync (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  status TEXT NOT NULL DEFAULT 'idle',
+  started_at TEXT,
+  completed_at TEXT,
+  last_error TEXT,
+  total_targets INTEGER NOT NULL DEFAULT 0,
+  updated_targets INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`;
 
 function json(data: unknown, init: ResponseInit = {}) {
   const headers = new Headers(init.headers);
@@ -332,6 +340,7 @@ async function ensureDatabase(env: Env) {
     env.DB.prepare(CREATE_REEL_INSIGHT_SNAPSHOTS),
     env.DB.prepare(CREATE_REEL_INSIGHTS_DAY_INDEX),
     env.DB.prepare(CREATE_REEL_INSIGHTS_REEL_INDEX),
+    env.DB.prepare(CREATE_INSTAGRAM_INSIGHT_SYNC),
     ...YOUTUBE_SCHEMA_STATEMENTS.map((statement) => env.DB.prepare(statement)),
   ]);
 
@@ -360,6 +369,8 @@ async function ensureDatabase(env: Env) {
     env.DB.prepare(`UPDATE reels SET publish_status = 'awaiting_approval'
       WHERE status = 'ready' AND publish_status = 'queued' AND approved_at IS NULL`),
     env.DB.prepare(CREATE_REEL_INSIGHTS_MILESTONE_INDEX),
+    env.DB.prepare(`INSERT OR IGNORE INTO instagram_insight_sync
+      (id, status, total_targets, updated_targets) VALUES (1, 'idle', 0, 0)`),
   ]);
 }
 
@@ -1033,38 +1044,65 @@ function insightMilestone(publishedAt: string | null) {
 
 async function refreshReelInsights(target: PublishedReelInsightTarget, env: Env) {
   try {
-    const primary = await mediaInsightRequest(
-      target.instagram_media_id,
-      ["views", "reach", "likes", "comments", "saved", "shares", "total_interactions"],
-      env,
-    );
-    let watch = new Map<string, number>();
+    const previous = await env.DB.prepare(`SELECT views, reach, likes, comments, saved, shares,
+      total_interactions, average_watch_time_ms, total_watch_time_ms
+      FROM reel_insights WHERE reel_id = ?`).bind(target.id).first<Record<string, number>>();
+    let core: Map<string, number>;
     try {
-      watch = await mediaInsightRequest(
+      core = await mediaInsightRequest(target.instagram_media_id, ["views", "reach"], env);
+    } catch (groupError) {
+      const views = await mediaInsightRequest(target.instagram_media_id, ["views"], env);
+      let reach = new Map<string, number>();
+      try {
+        reach = await mediaInsightRequest(target.instagram_media_id, ["reach"], env);
+      } catch (error) {
+        console.warn(`O alcance do Reel #${target.id} não está disponível:`, error, groupError);
+      }
+      core = new Map([...views, ...reach]);
+    }
+    const [engagementResult, watchResult] = await Promise.allSettled([
+      mediaInsightRequest(
+        target.instagram_media_id,
+        ["likes", "comments", "saved", "shares", "total_interactions"],
+        env,
+      ),
+      mediaInsightRequest(
         target.instagram_media_id,
         ["ig_reels_avg_watch_time", "ig_reels_video_view_total_time"],
         env,
-      );
-    } catch (error) {
-      console.warn(`As métricas de retenção do Reel #${target.id} não estão disponíveis:`, error);
+      ),
+    ]);
+    const engagement = engagementResult.status === "fulfilled"
+      ? engagementResult.value
+      : new Map<string, number>();
+    const watch = watchResult.status === "fulfilled"
+      ? watchResult.value
+      : new Map<string, number>();
+    if (engagementResult.status === "rejected") {
+      console.warn(`As métricas de engajamento do Reel #${target.id} não estão disponíveis:`, engagementResult.reason);
+    }
+    if (watchResult.status === "rejected") {
+      console.warn(`As métricas de retenção do Reel #${target.id} não estão disponíveis:`, watchResult.reason);
     }
 
-    const likes = primary.get("likes") || 0;
-    const comments = primary.get("comments") || 0;
-    const saved = primary.get("saved") || 0;
-    const shares = primary.get("shares") || 0;
-    const totalInteractions = primary.get("total_interactions")
+    const likes = engagement.get("likes") ?? Number(previous?.likes || 0);
+    const comments = engagement.get("comments") ?? Number(previous?.comments || 0);
+    const saved = engagement.get("saved") ?? Number(previous?.saved || 0);
+    const shares = engagement.get("shares") ?? Number(previous?.shares || 0);
+    const totalInteractions = engagement.get("total_interactions")
       || likes + comments + saved + shares;
     const metrics = {
-      views: primary.get("views") || 0,
-      reach: primary.get("reach") || 0,
+      views: core.get("views") ?? Number(previous?.views || 0),
+      reach: core.get("reach") ?? Number(previous?.reach || 0),
       likes,
       comments,
       saved,
       shares,
       totalInteractions,
-      averageWatchTimeMs: watch.get("ig_reels_avg_watch_time") || 0,
-      totalWatchTimeMs: watch.get("ig_reels_video_view_total_time") || 0,
+      averageWatchTimeMs: watch.get("ig_reels_avg_watch_time")
+        ?? Number(previous?.average_watch_time_ms || 0),
+      totalWatchTimeMs: watch.get("ig_reels_video_view_total_time")
+        ?? Number(previous?.total_watch_time_ms || 0),
     };
     const milestone = insightMilestone(target.published_at);
 
@@ -1127,11 +1165,82 @@ async function refreshAllInsights(env: Env) {
     WHERE publish_status = 'published' AND instagram_media_id IS NOT NULL
     ORDER BY published_at DESC LIMIT 100`)
     .all<PublishedReelInsightTarget>();
+  let cursor = 0;
   let updated = 0;
-  for (const target of results) {
-    if (await refreshReelInsights(target, env)) updated += 1;
-  }
+  const workers = Array.from({ length: Math.min(6, results.length) }, async () => {
+    while (cursor < results.length) {
+      const target = results[cursor++];
+      const succeeded = await refreshReelInsights(target, env);
+      if (succeeded) updated += 1;
+      await env.DB.prepare(`UPDATE instagram_insight_sync
+        SET updated_targets = updated_targets + ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1`).bind(succeeded ? 1 : 0).run();
+    }
+  });
+  await Promise.all(workers);
   return { total: results.length, updated };
+}
+
+type InstagramInsightSyncState = {
+  status: string;
+  started_at: string | null;
+  completed_at: string | null;
+  last_error: string | null;
+  total_targets: number;
+  updated_targets: number;
+};
+
+async function insightSyncState(env: Env) {
+  const state = await env.DB.prepare(`SELECT status, started_at, completed_at, last_error,
+    total_targets, updated_targets FROM instagram_insight_sync WHERE id = 1`)
+    .first<InstagramInsightSyncState>();
+  const startedAt = databaseTimestamp(state?.started_at || null);
+  if (state?.status === "running" && Number.isFinite(startedAt)
+    && Date.now() - startedAt > 2 * 60 * 1000) {
+    return {
+      ...state,
+      status: "failed",
+      last_error: "A última sincronização excedeu o tempo esperado. Tente atualizar novamente.",
+    };
+  }
+  return state;
+}
+
+async function claimInsightRefresh(env: Env) {
+  const result = await env.DB.prepare(`UPDATE instagram_insight_sync
+    SET status = 'running', started_at = CURRENT_TIMESTAMP, completed_at = NULL,
+      last_error = NULL, total_targets = 0, updated_targets = 0,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = 1 AND (status <> 'running' OR started_at IS NULL
+      OR datetime(started_at) < datetime('now', '-2 minutes'))`).run();
+  return Number(result.meta.changes || 0) > 0;
+}
+
+async function executeClaimedInsightRefresh(env: Env) {
+  try {
+    const total = await env.DB.prepare(`SELECT COUNT(*) AS total FROM reels
+      WHERE publish_status = 'published' AND instagram_media_id IS NOT NULL`)
+      .first<{ total: number }>();
+    await env.DB.prepare(`UPDATE instagram_insight_sync SET total_targets = ?,
+      updated_at = CURRENT_TIMESTAMP WHERE id = 1`).bind(Number(total?.total || 0)).run();
+    const result = await refreshAllInsights(env);
+    await env.DB.prepare(`UPDATE instagram_insight_sync SET status = 'idle',
+      completed_at = CURRENT_TIMESTAMP, last_error = NULL, total_targets = ?,
+      updated_targets = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`)
+      .bind(result.total, result.updated).run();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Falha ao atualizar os Insights.";
+    await env.DB.prepare(`UPDATE instagram_insight_sync SET status = 'failed',
+      completed_at = CURRENT_TIMESTAMP, last_error = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1`).bind(message.slice(0, 500)).run();
+    console.error("Falha na sincronização dos Insights do Instagram:", error);
+  }
+}
+
+async function startInsightRefresh(env: Env, ctx: ExecutionContext) {
+  const claimed = await claimInsightRefresh(env);
+  if (claimed) ctx.waitUntil(executeClaimedInsightRefresh(env));
+  return claimed;
 }
 
 function databaseTimestamp(value: string | null) {
@@ -1715,13 +1824,6 @@ async function dashboard(env: Env, baseUrl: string) {
     SUM(CASE WHEN date(created_at) >= date('now', '-6 days') THEN 1 ELSE 0 END) AS last_seven_days
     FROM reels`).first<Record<string, number | null>>();
   const preferences = await studioSettings(env);
-  const youtubeMetrics = await env.DB.prepare(`SELECT
-    SUM(CASE WHEN status IN ('queued', 'leased', 'analyzing', 'uploading', 'processing') THEN 1 ELSE 0 END) AS processing,
-    SUM(CASE WHEN status = 'awaiting_studio_check' THEN 1 ELSE 0 END) AS awaiting_checks,
-    SUM(CASE WHEN status = 'published' THEN 1 ELSE 0 END) AS published,
-    SUM(CASE WHEN status IN ('failed', 'blocked') THEN 1 ELSE 0 END) AS failed
-    FROM youtube_publications`).first<Record<string, number | null>>();
-  const youtube = await youtubeConnection(env);
   return {
     metrics: {
       total: Number(row?.total || 0),
@@ -1732,10 +1834,6 @@ async function dashboard(env: Env, baseUrl: string) {
       failed: Number(row?.download_failed || 0) + Number(row?.publish_failed || 0),
       stored_bytes: Number(row?.stored_bytes || 0),
       last_seven_days: Number(row?.last_seven_days || 0),
-      youtube_processing: Number(youtubeMetrics?.processing || 0),
-      youtube_awaiting_checks: Number(youtubeMetrics?.awaiting_checks || 0),
-      youtube_published: Number(youtubeMetrics?.published || 0),
-      youtube_failed: Number(youtubeMetrics?.failed || 0),
     },
     settings: {
       meta_connected: metaConnected(env),
@@ -1746,12 +1844,12 @@ async function dashboard(env: Env, baseUrl: string) {
       resolver_connected: Boolean(env.REEL_RESOLVER_URL),
       ...settingsPayload(preferences, baseUrl),
       account: "@btsupply_",
-      youtube,
     },
   };
 }
 
 async function analyticsDashboard(env: Env, baseUrl: string) {
+  const currentSync = await insightSyncState(env);
   const { results } = await env.DB.prepare(`SELECT
     r.id, r.source_account, r.source_url, r.instagram_media_id, r.instagram_permalink,
     r.published_at, r.created_at, r.completed_at,
@@ -1821,8 +1919,11 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
   const attempted = results.filter((row) => row.updated_at);
   const lastSyncedAt = successful.map((row) => row.updated_at as string).sort().at(-1) || null;
   const lastAttemptAt = attempted.map((row) => row.updated_at as string).sort().at(-1) || null;
-  const permissionRequired = results.some((row) =>
-    /permission|permissão|access token|OAuthException|not authorized|Meta 10\b/i.test(row.last_error || ""));
+  const latestError = currentSync?.last_error
+    || results.find((row) => row.last_error)?.last_error
+    || null;
+  const permissionRequired = /permission|permissão|access token|OAuthException|not authorized|Meta 10\b/i
+    .test(latestError || "");
   const attemptTimestamp = databaseTimestamp(lastAttemptAt);
   const refreshDue = results.length > 0 && (
     !Number.isFinite(attemptTimestamp)
@@ -1920,7 +2021,6 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
     history: historyRows.reverse(),
     publication_history: publicationHistory,
     recommendations,
-    youtube: await youtubeAnalyticsPayload(env),
     sync: {
       status: permissionRequired
         ? "permission_required"
@@ -1930,12 +2030,17 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
             ? "waiting"
             : "empty",
       last_synced_at: lastSyncedAt,
-      last_attempt_at: lastAttemptAt,
+      last_attempt_at: currentSync?.started_at || lastAttemptAt,
       refresh_due: refreshDue,
+      refreshing: currentSync?.status === "running",
+      total_targets: Number(currentSync?.total_targets || 0),
+      updated_targets: Number(currentSync?.updated_targets || 0),
       permission_required: permissionRequired,
       message: permissionRequired
         ? "A conta precisa autorizar instagram_business_manage_insights."
-        : null,
+        : currentSync?.status === "failed"
+          ? currentSync.last_error
+          : null,
     },
   };
 }
@@ -2238,31 +2343,17 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
 
   if (url.pathname === "/api/analytics" && request.method === "GET") {
     if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
-    const data = await analyticsDashboard(env, baseUrl);
-    if (data.sync.refresh_due && metaConnected(env)) {
-      ctx.waitUntil(refreshAllInsights(env));
-    }
-    return json({
-      ...data,
-      sync: {
-        ...data.sync,
-        refreshing: data.sync.refresh_due && metaConnected(env),
-      },
-    });
+    return json(await analyticsDashboard(env, baseUrl));
   }
 
   if (url.pathname === "/api/analytics/refresh" && request.method === "POST") {
     if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
     if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
-    const connection = await youtubeConnection(env);
-    if (!metaConnected(env) && !connection.connected) {
-      return json({ error: "Conecte o Instagram ou o YouTube antes de atualizar métricas." }, { status: 503 });
+    if (!metaConnected(env)) {
+      return json({ error: "Conecte o Instagram antes de atualizar as métricas." }, { status: 503 });
     }
-    ctx.waitUntil(Promise.allSettled([
-      ...(metaConnected(env) ? [refreshAllInsights(env)] : []),
-      ...(connection.connected ? [refreshYouTubeInsights(env)] : []),
-    ]));
-    return json({ accepted: true }, { status: 202 });
+    const accepted = await startInsightRefresh(env, ctx);
+    return json({ accepted, already_running: !accepted }, { status: 202 });
   }
 
   if (url.pathname === "/api/reels/intake" && request.method === "POST") {
@@ -2483,13 +2574,8 @@ const worker = {
     await ensureDatabase(env);
     if (!env.PUBLIC_BASE_URL) return;
     ctx.waitUntil(processPublicationQueue(env, env.PUBLIC_BASE_URL.replace(/\/+$/, "")));
-    ctx.waitUntil(dispatchYouTubeExecutor(env));
     if (new Date(controller.scheduledTime).getUTCMinutes() === 5) {
-      const connection = await youtubeConnection(env);
-      ctx.waitUntil(Promise.allSettled([
-        ...(metaConnected(env) ? [refreshAllInsights(env)] : []),
-        ...(connection.connected ? [refreshYouTubeInsights(env)] : []),
-      ]));
+      if (metaConnected(env)) await startInsightRefresh(env, ctx);
     }
   },
 };

@@ -61,7 +61,9 @@ Com Instagram Login, o token precisa das permissões
 - `PUT /api/studio-settings`: salva legenda, capa e intervalo da fila.
 - `POST /api/studio-settings/cover`: envia uma capa fixa ao R2.
 - `GET /api/analytics`: retorna métricas e recomendações do Instagram.
-- `POST /api/analytics/refresh`: solicita nova leitura de Insights.
+- `POST /api/analytics/refresh`: solicita uma leitura exclusiva dos Insights;
+  sincronizações sobrepostas são bloqueadas e os Reels são processados com
+  concorrência limitada para permanecer dentro do tempo do worker.
 - `POST /api/reels/:id/publish`: aprova, retoma ou repete uma publicação.
 - `POST /api/publication-queue/process`: processa um item vencido.
 - `GET /download/:token`: entrega o MP4 ao usuário.

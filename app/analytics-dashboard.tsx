@@ -92,6 +92,8 @@ type Analytics = {
     last_attempt_at: string | null;
     refresh_due: boolean;
     refreshing: boolean;
+    total_targets: number;
+    updated_targets: number;
     permission_required: boolean;
     message: string | null;
   };
@@ -279,7 +281,9 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
           <span className={`connection-dot ${analytics?.sync.status === "connected" ? "online" : ""}`} />
           <div>
             <strong>
-              {analytics?.sync.status === "connected"
+              {analytics?.sync.refreshing
+                ? `Atualizando ${analytics.sync.updated_targets} de ${analytics.sync.total_targets || "…"}`
+                : analytics?.sync.status === "connected"
                 ? "Insights conectados"
                 : analytics?.sync.status === "permission_required"
                   ? "Autorização de Insights necessária"
@@ -299,6 +303,9 @@ export default function AnalyticsDashboard({ account, operations }: AnalyticsDas
       </section>
 
       {error ? <div className="global-notice error" role="alert">{error}</div> : null}
+      {!error && analytics?.sync.message && !analytics.sync.permission_required ? (
+        <div className="global-notice error" role="alert">{analytics.sync.message}</div>
+      ) : null}
       {analytics?.sync.permission_required ? (
         <div className="insights-permission" role="status">
           <div>

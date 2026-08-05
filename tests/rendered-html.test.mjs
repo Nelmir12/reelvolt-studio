@@ -87,7 +87,18 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(worker, /instagram_business_manage_insights/);
   assert.match(worker, /reel_insight_snapshots/);
   assert.match(worker, /publication_history: publicationHistory/);
-  assert.match(worker, /\"views\", \"reach\", \"likes\", \"comments\", \"saved\", \"shares\"/);
+  assert.match(worker, /\[\"views\", \"reach\"\]/);
+  assert.match(worker, /\[\"likes\", \"comments\", \"saved\", \"shares\", \"total_interactions\"\]/);
+  assert.match(worker, /instagram_insight_sync/);
+  assert.match(worker, /Math\.min\(6, results\.length\)/);
+  assert.match(worker, /already_running/);
+  const analyticsRoute = worker.slice(
+    worker.indexOf('url.pathname === \"\/api\/analytics\"'),
+    worker.indexOf('url.pathname === \"\/api\/reels\/intake\"'),
+  );
+  assert.doesNotMatch(analyticsRoute, /youtube|refreshAllInsights/i);
+  const scheduledHandler = worker.slice(worker.indexOf("async scheduled("));
+  assert.doesNotMatch(scheduledHandler, /YouTube|refreshAllInsights/);
   assert.match(worker, /media_publish/);
   assert.match(worker, /reconcilePublishedReel/);
   assert.match(worker, /WHERE r\.status <> 'failed'/);
