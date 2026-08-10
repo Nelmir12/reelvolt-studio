@@ -105,7 +105,7 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.doesNotMatch(scheduledHandler, /YouTube|refreshAllInsights/);
   assert.match(worker, /media_publish/);
   assert.match(worker, /reconcilePublishedReel/);
-  assert.match(worker, /WHERE r\.status <> 'failed'/);
+  assert.match(worker, /WHERE r\.archived_at IS NULL AND r\.status <> 'failed'/);
   assert.match(worker, /cover_url/);
   assert.match(worker, /publish-media/);
   assert.match(worker, /studio_settings/);
@@ -121,6 +121,13 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(worker, /instagram_business_manage_messages|subscribed_fields/);
   assert.match(worker, /messaging_type: "RESPONSE"/);
   assert.match(worker, /record\.sender_id\.startsWith\("instagram:"\)/);
+  assert.match(worker, /"share", "media", "video", "ig_reel", "reel"/);
+  assert.match(worker, /request\.method === "DELETE"/);
+  assert.match(worker, /env\.VIDEOS\.delete\(record\.storage_key\)/);
+  assert.match(worker, /media_deleted_at/);
+  assert.match(worker, /WHERE r\.archived_at IS NULL AND r\.status <> 'failed' ORDER BY r\.id DESC/);
+  assert.doesNotMatch(worker, /ORDER BY r\.id DESC LIMIT 80/);
+  assert.match(worker, /instagram_media_id, instagram_permalink FROM reels/);
   assert.match(worker, /destinations/);
   assert.match(youtube, /YOUTUBE_PUBLISHING_ENABLED = false/);
   assert.match(youtube, /youtube_publishing_retired/);
@@ -136,6 +143,8 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(inbox, /APROVAÇÃO DO INSTAGRAM/);
   assert.match(inbox, /MP4 pronto/);
   assert.match(inbox, /Publicado no Instagram/);
+  assert.match(inbox, /Excluir arquivo/);
+  assert.match(inbox, /métricas foram preservadas/);
   assert.doesNotMatch(inbox, /YouTube|Shorts/);
   assert.match(inbox, /Como acompanhar/);
   assert.doesNotMatch(inbox, /<option value="auto">/);

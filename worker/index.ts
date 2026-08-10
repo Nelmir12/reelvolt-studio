@@ -8,7 +8,6 @@ import {
   publicationDestinations,
   queueYouTubePublication,
   youtubeConnection,
-  youtubeSummaries,
   type ContentTargetInput,
   type YouTubeEnv,
 } from "./youtube";
@@ -115,7 +114,6 @@ type ReelListRow = ReelRecord & {
   created_at: string;
   completed_at: string | null;
   instagram_selected: number;
-  youtube_selected: number;
   rights_basis: "owned" | "licensed" | null;
   content_context: string | null;
   made_for_kids: number;
@@ -215,6 +213,8 @@ const CREATE_REELS = `CREATE TABLE IF NOT EXISTS reels (
   instagram_permalink TEXT,
   publish_requested_at TEXT,
   published_at TEXT,
+  archived_at TEXT,
+  media_deleted_at TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   completed_at TEXT
 )`;
@@ -235,6 +235,8 @@ const ADDITIONAL_COLUMNS: Record<string, string> = {
   instagram_permalink: "ALTER TABLE reels ADD COLUMN instagram_permalink TEXT",
   publish_requested_at: "ALTER TABLE reels ADD COLUMN publish_requested_at TEXT",
   published_at: "ALTER TABLE reels ADD COLUMN published_at TEXT",
+  archived_at: "ALTER TABLE reels ADD COLUMN archived_at TEXT",
+  media_deleted_at: "ALTER TABLE reels ADD COLUMN media_deleted_at TEXT",
 };
 
 const CREATE_REELS_INDEX = "CREATE INDEX IF NOT EXISTS reels_created_at_idx ON reels (created_at DESC)";
@@ -242,6 +244,7 @@ const CREATE_REELS_SOURCE_INDEX = "CREATE INDEX IF NOT EXISTS reels_source_url_i
 const CREATE_REELS_PUBLIC_TOKEN_INDEX = "CREATE UNIQUE INDEX IF NOT EXISTS reels_public_token_idx ON reels (public_token)";
 const CREATE_REELS_PUBLISH_INDEX = "CREATE INDEX IF NOT EXISTS reels_publish_status_idx ON reels (publish_status)";
 const CREATE_REELS_SCHEDULE_INDEX = "CREATE INDEX IF NOT EXISTS reels_schedule_idx ON reels (publish_status, scheduled_for)";
+const CREATE_REELS_ACTIVE_INDEX = "CREATE INDEX IF NOT EXISTS reels_active_id_idx ON reels (archived_at, id DESC)";
 const CREATE_STUDIO_SETTINGS = `CREATE TABLE IF NOT EXISTS studio_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   caption_enabled INTEGER NOT NULL DEFAULT 1,
@@ -362,6 +365,7 @@ async function ensureDatabase(env: Env) {
   await env.DB.batch([
     env.DB.prepare(CREATE_REELS_PUBLISH_INDEX),
     env.DB.prepare(CREATE_REELS_SCHEDULE_INDEX),
+    env.DB.prepare(CREATE_REELS_ACTIVE_INDEX),
     env.DB.prepare(`INSERT OR IGNORE INTO studio_settings
       (id, caption_enabled, default_caption, cover_mode, auto_publish_enabled, publish_interval_minutes)
       VALUES (1, 1, ?, 'fixed', 0, ?)`)
@@ -821,8 +825,9 @@ function instagramWebhookMessages(payload: InstagramWebhookPayload) {
 function directSharedReelUrl(message: InstagramWebhookMessage["message"]) {
   const textUrl = findInstagramUrl(message?.text || "");
   if (textUrl) return textUrl;
+  const supportedShareTypes = new Set(["share", "media", "video", "ig_reel", "reel"]);
   for (const attachment of message?.attachments || []) {
-    if (!new Set(["ig_reel", "reel"]).has((attachment.type || "").toLowerCase())) continue;
+    if (!supportedShareTypes.has((attachment.type || "").toLowerCase())) continue;
     const candidate = attachment.payload?.url;
     if (typeof candidate !== "string") continue;
     const reelUrl = findInstagramUrl(candidate);
@@ -1604,7 +1609,7 @@ async function queueReel(
   ctx: ExecutionContext,
 ): Promise<QueueResult> {
   const existing = await env.DB.prepare(
-    "SELECT id FROM reels WHERE source_url = ? AND status <> 'failed' ORDER BY id DESC LIMIT 1",
+    "SELECT id FROM reels WHERE source_url = ? AND archived_at IS NULL AND status <> 'failed' ORDER BY id DESC LIMIT 1",
   ).bind(input.sourceUrl).first<{ id: number }>();
   if (existing) return { accepted: false, reason: "duplicate", id: existing.id };
 
@@ -1692,14 +1697,12 @@ async function listReels(env: Env, baseUrl: string) {
     r.published_at, r.created_at, r.completed_at,
     COALESCE(cr.instagram_enabled,
       CASE WHEN r.publication_mode = 'download_only' THEN 0 ELSE 1 END) AS instagram_selected,
-    COALESCE(cr.youtube_enabled, 0) AS youtube_selected,
     cr.rights_basis, cr.context AS content_context,
     COALESCE(cr.made_for_kids, 0) AS made_for_kids,
     COALESCE(cr.contains_synthetic_media, 0) AS contains_synthetic_media,
     COALESCE(cr.paid_product_placement, 0) AS paid_product_placement
     FROM reels r LEFT JOIN content_reviews cr ON cr.reel_id = r.id
-    WHERE r.status <> 'failed' ORDER BY r.id DESC LIMIT 80`).all<ReelListRow>();
-  const summaries = await youtubeSummaries(results.map((row) => row.id), env);
+    WHERE r.archived_at IS NULL AND r.status <> 'failed' ORDER BY r.id DESC`).all<ReelListRow>();
   return results.map((row) => ({
     ...row,
     download_url: row.status === "ready" && row.public_token
@@ -1711,12 +1714,46 @@ async function listReels(env: Env, baseUrl: string) {
     rights_confirmed: Boolean(row.rights_confirmed),
     intake_source: row.sender_id.startsWith("instagram:") ? "instagram_direct" : "web",
     instagram_selected: Boolean(row.instagram_selected),
-    youtube_selected: Boolean(row.youtube_selected),
     made_for_kids: Boolean(row.made_for_kids),
     contains_synthetic_media: Boolean(row.contains_synthetic_media),
     paid_product_placement: Boolean(row.paid_product_placement),
-    youtube: summaries.get(row.id) || null,
   }));
+}
+
+async function archiveReelMedia(id: number, env: Env) {
+  const record = await env.DB.prepare(`SELECT id, storage_key, status, publish_status,
+    instagram_media_id, instagram_permalink FROM reels
+    WHERE id = ? AND archived_at IS NULL`)
+    .bind(id)
+    .first<{
+      id: number;
+      storage_key: string | null;
+      status: string;
+      publish_status: string;
+      instagram_media_id: string | null;
+      instagram_permalink: string | null;
+    }>();
+  if (!record) return { found: false as const };
+  if (record.status !== "ready") {
+    return { found: true as const, blocked: true as const, preparing: true as const };
+  }
+  if (["queued", "creating", "processing", "publishing"].includes(record.publish_status)) {
+    return { found: true as const, blocked: true as const };
+  }
+
+  if (record.storage_key) await env.VIDEOS.delete(record.storage_key);
+  await env.DB.prepare(`UPDATE reels SET archived_at = CURRENT_TIMESTAMP,
+    media_deleted_at = CASE WHEN storage_key IS NOT NULL THEN CURRENT_TIMESTAMP ELSE media_deleted_at END,
+    storage_key = NULL, filename = NULL, content_type = NULL, size_bytes = NULL,
+    public_token = NULL, error = NULL
+    WHERE id = ? AND archived_at IS NULL`)
+    .bind(id)
+    .run();
+  return {
+    found: true as const,
+    blocked: false as const,
+    metricsPreserved: Boolean(record.instagram_media_id || record.instagram_permalink),
+  };
 }
 
 type ViewHistoryRow = {
@@ -1821,10 +1858,10 @@ function viewPeriodSummary(
 async function dashboard(env: Env, baseUrl: string) {
   const row = await env.DB.prepare(`SELECT
     COUNT(*) AS total,
-    SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END) AS ready,
+    SUM(CASE WHEN archived_at IS NULL AND status = 'ready' THEN 1 ELSE 0 END) AS ready,
     SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS download_failed,
-    SUM(CASE WHEN publish_status = 'awaiting_approval' THEN 1 ELSE 0 END) AS awaiting_approval,
-    SUM(CASE WHEN publish_status IN ('creating', 'processing', 'publishing', 'queued') THEN 1 ELSE 0 END) AS publishing,
+    SUM(CASE WHEN archived_at IS NULL AND publish_status = 'awaiting_approval' THEN 1 ELSE 0 END) AS awaiting_approval,
+    SUM(CASE WHEN archived_at IS NULL AND publish_status IN ('creating', 'processing', 'publishing', 'queued') THEN 1 ELSE 0 END) AS publishing,
     SUM(CASE WHEN publish_status = 'published' THEN 1 ELSE 0 END) AS published,
     SUM(CASE WHEN publish_status = 'failed' THEN 1 ELSE 0 END) AS publish_failed,
     COALESCE(SUM(size_bytes), 0) AS stored_bytes,
@@ -2060,7 +2097,7 @@ async function receiveDirectReel(
   baseUrl: string,
 ) {
   const existing = await env.DB.prepare(`SELECT id, status FROM reels
-    WHERE source_url = ? AND status <> 'failed' ORDER BY id DESC LIMIT 1`)
+    WHERE source_url = ? AND archived_at IS NULL AND status <> 'failed' ORDER BY id DESC LIMIT 1`)
     .bind(sourceUrl).first<{ id: number; status: string }>();
   if (existing) {
     if (existing.status === "ready") {
@@ -2266,6 +2303,20 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       return json({ error: "Não autorizado." }, { status: 401 });
     }
     return json({ reels: await listReels(env, baseUrl) });
+  }
+
+  const deleteReelMatch = url.pathname.match(/^\/api\/reels\/(\d+)$/);
+  if (deleteReelMatch && request.method === "DELETE") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    const result = await archiveReelMedia(Number(deleteReelMatch[1]), env);
+    if (!result.found) return json({ error: "Reel não encontrado." }, { status: 404 });
+    if (result.blocked) {
+      return json({
+        error: "O arquivo ainda está sendo preparado ou publicado. Aguarde a conclusão antes de excluir.",
+      }, { status: 409 });
+    }
+    return json({ deleted: true, metrics_preserved: result.metricsPreserved });
   }
 
   if (url.pathname === "/api/dashboard" && request.method === "GET") {

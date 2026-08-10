@@ -33,11 +33,14 @@ export const reels = sqliteTable("reels", {
   instagramPermalink: text("instagram_permalink"),
   publishRequestedAt: text("publish_requested_at"),
   publishedAt: text("published_at"),
+  archivedAt: text("archived_at"),
+  mediaDeletedAt: text("media_deleted_at"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   completedAt: text("completed_at"),
 }, (table) => [
   index("reels_publish_status_idx").on(table.publishStatus),
   index("reels_schedule_idx").on(table.publishStatus, table.scheduledFor),
+  index("reels_active_id_idx").on(table.archivedAt, table.id),
 ]);
 
 export const studioSettings = sqliteTable("studio_settings", {

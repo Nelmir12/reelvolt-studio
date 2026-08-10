@@ -1126,6 +1126,28 @@ select:focus-visible {
   color: var(--accent);
 }
 
+.action-danger {
+  min-height: 32px;
+  border: 1px solid #e3b6b6;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #fffafa;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 8px;
+  font-weight: 680;
+}
+
+.action-danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: #fff2f2;
+}
+
+.action-danger:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
 .approval-overlay {
   position: fixed;
   z-index: 50;

@@ -56,7 +56,9 @@ Com Instagram Login, o token precisa das permissões
 - `POST /api/instagram/direct/subscribe`: ativa `messages` e
   `messaging_postbacks` para a conta profissional.
 - `POST /api/reels/intake`: recebe um Reel e as opções do fluxo.
-- `GET /api/reels`: lista os registros recentes.
+- `GET /api/reels`: lista todos os registros ativos, sem corte fixo por quantidade.
+- `DELETE /api/reels/:id`: remove o MP4 do R2 e arquiva o item; quando o Reel já
+  foi publicado, preserva a publicação e todo o histórico de Insights.
 - `GET /api/dashboard`: retorna métricas e estado do Instagram.
 - `PUT /api/studio-settings`: salva legenda, capa e intervalo da fila.
 - `POST /api/studio-settings/cover`: envia uma capa fixa ao R2.
@@ -104,3 +106,18 @@ Para continuar o projeto em outra máquina, consulte
 - Nunca aceite um evento do Direct sem assinatura HMAC válida; o primeiro
   evento autorizado confere o username e fixa o Instagram-scoped ID de
   `@nelmirjr` no D1.
+
+## Entrada pelo Direct e alternativa gratuita
+
+O webhook aceita os tipos de compartilhamento que a Meta pode enviar para um
+post ou Reel (`share`, `media`, `video`, `ig_reel` e `reel`). Depois que
+`@nelmirjr` confirma os direitos pela resposta rápida, o MP4 é preparado sem
+outra ação e o Direct devolve o botão de aprovação no ReelVolt.
+
+Para uso restrito às próprias contas, mantenha `@nelmirjr` e `@btsupply_` como
+contas de teste/funções do aplicativo e conceda
+`instagram_business_manage_messages`; isso evita depender de acesso avançado
+destinado a usuários externos. Se a Meta não liberar os eventos reais nesse
+modo, a alternativa sem serviço pago continua sendo compartilhar/copiar o link
+para o ReelVolt instalado no iPhone. O link chega preenchido, e a confirmação
+de direitos permanece obrigatória antes do download.

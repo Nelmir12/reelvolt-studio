@@ -226,6 +226,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [publishingId, setPublishingId] = useState<number | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
   const [approvalDraft, setApprovalDraft] = useState<ApprovalDraft | null>(null);
   const [captionEnabled, setCaptionEnabled] = useState(true);
   const [caption, setCaption] = useState(EMPTY_DASHBOARD.settings.caption);
@@ -478,6 +479,47 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
       });
     } finally {
       setPublishingId(null);
+    }
+  }
+
+  async function deleteReel(reel: Reel) {
+    const published = reel.publish_status === "published" || Boolean(reel.instagram_permalink);
+    const confirmed = window.confirm(
+      published
+        ? `Excluir o MP4 do Reel #${reel.id}? A publicação e todas as métricas do Instagram serão preservadas.`
+        : `Excluir o MP4 do Reel #${reel.id}? Ele sairá da produção e o arquivo armazenado será removido.`,
+    );
+    if (!confirmed) return;
+    setDeletingId(reel.id);
+    setNotice(null);
+    try {
+      const response = await fetch(`/api/reels/${reel.id}`, {
+        method: "DELETE",
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+      const data = await response.json() as {
+        deleted?: boolean;
+        metrics_preserved?: boolean;
+        error?: string;
+      };
+      if (!response.ok || !data.deleted) {
+        throw new Error(data.error || "Não foi possível excluir o arquivo.");
+      }
+      setNotice({
+        tone: "success",
+        text: data.metrics_preserved
+          ? `MP4 do Reel #${reel.id} excluído. A publicação e as métricas foram preservadas.`
+          : `Reel #${reel.id} e seu MP4 foram removidos da produção.`,
+      });
+      await loadData(true);
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Não foi possível excluir o arquivo.",
+      });
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -923,6 +965,16 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                     ) : (
                       <span className="processing-label">{reel.status === "failed" ? "Verifique o erro" : "Processando arquivo"}</span>
                     )}
+                    {reel.download_url ? (
+                      <button
+                        className="action-danger"
+                        type="button"
+                        onClick={() => void deleteReel(reel)}
+                        disabled={deletingId === reel.id || ["queued", "creating", "processing", "publishing"].includes(reel.publish_status)}
+                      >
+                        {deletingId === reel.id ? "Excluindo…" : "Excluir arquivo"}
+                      </button>
+                    ) : null}
                   </div>
                 </article>
               );
