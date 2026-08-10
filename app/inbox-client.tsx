@@ -51,6 +51,7 @@ type Dashboard = {
     meta_connected: boolean;
     direct_configured: boolean;
     direct_allowed_username: string | null;
+    shortcut_configured: boolean;
     resolver_connected: boolean;
     cover_url: string;
     caption: string;
@@ -168,6 +169,7 @@ const EMPTY_DASHBOARD: Dashboard = {
     meta_connected: false,
     direct_configured: false,
     direct_allowed_username: null,
+    shortcut_configured: false,
     resolver_connected: false,
     cover_url: "/reel-cover.jpg",
     caption: "V arrived at #VogueWorld: Hollywood in unmistakable style, enjoying the live performances while showcasing the effortless elegance he's become known for. Another runway-worthy moment. #Taehyung",
@@ -214,7 +216,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
   const [sourceAccount, setSourceAccount] = useState("");
   const [publicationMode, setPublicationMode] = useState<Reel["publication_mode"]>("approval");
   const [shareToFeed, setShareToFeed] = useState(true);
-  const [rightsConfirmed, setRightsConfirmed] = useState(false);
+  const [rightsConfirmed, setRightsConfirmed] = useState(true);
   const instagramDestination = true;
   const [rightsBasis, setRightsBasis] = useState<"owned" | "licensed">("owned");
   const [contentContext, setContentContext] = useState("");
@@ -237,6 +239,8 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
   const [savingSettings, setSavingSettings] = useState(false);
   const [activatingDirect, setActivatingDirect] = useState(false);
   const [directActivated, setDirectActivated] = useState(false);
+  const [shortcutSetup, setShortcutSetup] = useState<{ token: string; endpoint: string } | null>(null);
+  const [creatingShortcutAccess, setCreatingShortcutAccess] = useState(false);
   const [notice, setNotice] = useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
   const [activeView, setActiveView] = useState<"inbox" | "dashboard">(initialView);
   const [reelPage, setReelPage] = useState(1);
@@ -373,7 +377,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
         setUrl("");
         setSourceAccount("");
         setContentContext("");
-        setRightsConfirmed(false);
+        setRightsConfirmed(true);
         setReelPage(1);
       } else if (data.reason === "duplicate") {
         setNotice({ tone: "info", text: `Esse Reel já está registrado como #${data.id}.` });
@@ -418,8 +422,8 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
       }
       setDirectActivated(true);
       setNotice({
-        tone: "success",
-        text: `Direct ativado. Somente ${dashboard.settings.direct_allowed_username} poderá enviar Reels.`,
+        tone: "info",
+        text: `Assinatura solicitada para ${dashboard.settings.direct_allowed_username}. A entrada pelo Direct ainda depende da liberação do aplicativo e do webhook pela Meta.`,
       });
     } catch (error) {
       setNotice({
@@ -428,6 +432,35 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
       });
     } finally {
       setActivatingDirect(false);
+    }
+  }
+
+  async function createShortcutAccess() {
+    setCreatingShortcutAccess(true);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/shortcut/access", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+      const data = await response.json() as { token?: string; endpoint?: string; error?: string };
+      if (!response.ok || !data.token || !data.endpoint) {
+        throw new Error(data.error || "Não foi possível criar o acesso do Atalho.");
+      }
+      setShortcutSetup({ token: data.token, endpoint: data.endpoint });
+      setNotice({
+        tone: "success",
+        text: "Acesso privado criado. Termine a configuração no app Atalhos do iPhone.",
+      });
+      await loadData(true);
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Não foi possível criar o acesso do Atalho.",
+      });
+    } finally {
+      setCreatingShortcutAccess(false);
     }
   }
 
@@ -638,12 +671,14 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
             </div>
           </div>
           <div className="connection-card direct-connection-card">
-            <span className={`connection-dot ${directActivated ? "online" : ""}`} />
+            <span className="connection-dot" />
             <div>
-              <strong>{directActivated ? "Direct ativado" : "Entrada pelo Direct"}</strong>
+              <strong>Entrada pelo Direct (Meta)</strong>
               <small>
-                {dashboard.settings.direct_configured
-                  ? `Restrita a ${dashboard.settings.direct_allowed_username}`
+                {directActivated
+                  ? "Assinatura solicitada; aguardando liberação da Meta"
+                  : dashboard.settings.direct_configured
+                  ? `Restrita a ${dashboard.settings.direct_allowed_username}; depende da liberação da Meta`
                   : "Aguardando configuração segura na Meta"}
               </small>
             </div>
@@ -653,10 +688,56 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
               </button>
             ) : null}
           </div>
+          <div className="connection-card direct-connection-card">
+            <span className={`connection-dot ${dashboard.settings.shortcut_configured ? "online" : ""}`} />
+            <div>
+              <strong>Atalho do iPhone</strong>
+              <small>
+                {dashboard.settings.shortcut_configured
+                  ? "Acesso privado configurado; prepara o MP4 ao compartilhar"
+                  : "Alternativa recomendada enquanto a Meta não libera o Direct"}
+              </small>
+            </div>
+            <button type="button" onClick={() => void createShortcutAccess()} disabled={creatingShortcutAccess}>
+              {creatingShortcutAccess
+                ? "Gerando…"
+                : dashboard.settings.shortcut_configured
+                  ? "Gerar novo acesso"
+                  : "Configurar Atalho"}
+            </button>
+          </div>
         </div>
       </section>
 
       {notice ? <div className={`global-notice ${notice.tone}`} role="status">{notice.text}</div> : null}
+
+      {shortcutSetup ? (
+        <section className="shortcut-setup" aria-labelledby="shortcut-setup-title">
+          <div className="section-heading">
+            <span>iOS</span>
+            <div>
+              <h2 id="shortcut-setup-title">Configurar compartilhamento direto</h2>
+              <p>O acesso abaixo aparece apenas agora. Guarde-o somente no app Atalhos.</p>
+            </div>
+          </div>
+          <ol>
+            <li>Crie um Atalho que aceite URLs pela Folha de Compartilhamento.</li>
+            <li>Adicione “Obter conteúdo de URL”, use o método POST e a URL abaixo.</li>
+            <li>Adicione o cabeçalho Authorization com o valor <code>Bearer SEU_TOKEN</code>.</li>
+            <li>No corpo JSON, envie <code>url</code> com a Entrada do Atalho.</li>
+          </ol>
+          <label>
+            URL do ReelVolt
+            <input type="text" readOnly value={shortcutSetup.endpoint} />
+          </label>
+          <label>
+            Token privado
+            <input type="text" readOnly value={shortcutSetup.token} />
+          </label>
+          <p className="shortcut-warning">Gerar outro acesso revoga imediatamente o anterior.</p>
+          <button className="ghost-button" type="button" onClick={() => setShortcutSetup(null)}>Concluí</button>
+        </section>
+      ) : null}
 
       <section className="studio-grid">
         <form className="intake-panel" onSubmit={submit}>
@@ -758,7 +839,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
               onChange={(event) => setRightsConfirmed(event.target.checked)}
               required
             />
-            <span>Confirmo que tenho autorização para baixar, editar e publicar este conteúdo.</span>
+            <span>Autorização permanente registrada para os links enviados por você.</span>
           </label>
 
           <button className="primary-button" type="submit" disabled={submitting}>

@@ -321,6 +321,13 @@ const CREATE_INSTAGRAM_INSIGHT_SYNC = `CREATE TABLE IF NOT EXISTS instagram_insi
   updated_targets INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`;
+const CREATE_SHORTCUT_ACCESS = `CREATE TABLE IF NOT EXISTS shortcut_access (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  token_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_used_at TEXT,
+  revoked_at TEXT
+)`;
 
 function json(data: unknown, init: ResponseInit = {}) {
   const headers = new Headers(init.headers);
@@ -338,6 +345,7 @@ async function ensureDatabase(env: Env) {
     env.DB.prepare(CREATE_REELS_PUBLIC_TOKEN_INDEX),
     env.DB.prepare(CREATE_STUDIO_SETTINGS),
     env.DB.prepare(CREATE_AUTHORIZED_SENDERS),
+    env.DB.prepare(CREATE_SHORTCUT_ACCESS),
     env.DB.prepare(CREATE_INSTAGRAM_AUTH),
     env.DB.prepare(CREATE_REEL_INSIGHTS),
     env.DB.prepare(CREATE_REEL_INSIGHT_SNAPSHOTS),
@@ -771,6 +779,26 @@ async function graphRequest(
     throw new Error(`${result.error?.message || "A Meta recusou a solicitação."}${details}`);
   }
   return result;
+}
+
+async function shortcutTokenHash(token: string) {
+  return base64Url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)));
+}
+
+function newShortcutToken() {
+  return base64Url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+}
+
+async function validShortcutRequest(request: Request, env: Env) {
+  const authorization = request.headers.get("authorization") || "";
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(token)) return false;
+  const tokenHash = await shortcutTokenHash(token);
+  const result = await env.DB.prepare(`UPDATE shortcut_access SET last_used_at = CURRENT_TIMESTAMP
+    WHERE id = 1 AND token_hash = ? AND revoked_at IS NULL`)
+    .bind(tokenHash)
+    .run();
+  return Boolean(result.meta.changes);
 }
 
 function directAllowedUsername(env: Env) {
@@ -1868,6 +1896,9 @@ async function dashboard(env: Env, baseUrl: string) {
     SUM(CASE WHEN date(created_at) >= date('now', '-6 days') THEN 1 ELSE 0 END) AS last_seven_days
     FROM reels`).first<Record<string, number | null>>();
   const preferences = await studioSettings(env);
+  const shortcut = await env.DB.prepare(
+    "SELECT id FROM shortcut_access WHERE id = 1 AND revoked_at IS NULL",
+  ).first<{ id: number }>();
   return {
     metrics: {
       total: Number(row?.total || 0),
@@ -1885,6 +1916,7 @@ async function dashboard(env: Env, baseUrl: string) {
       direct_allowed_username: directAllowedUsername(env)
         ? `@${directAllowedUsername(env)}`
         : null,
+      shortcut_configured: Boolean(shortcut),
       resolver_connected: Boolean(env.REEL_RESOLVER_URL),
       ...settingsPayload(preferences, baseUrl),
       account: "@btsupply_",
@@ -2115,8 +2147,8 @@ async function receiveDirectReel(
   await env.DB.prepare(`INSERT OR IGNORE INTO reels
     (message_id, sender_id, source_url, rules, source_account, rights_confirmed, public_token,
       status, publication_mode, share_to_feed, caption, publish_status)
-    VALUES (?, ?, ?, 'fixed_cover_caption', NULL, 0, ?, 'awaiting_rights',
-      'approval', 1, ?, 'not_requested')`)
+    VALUES (?, ?, ?, 'fixed_cover_caption', NULL, 1, ?, 'queued',
+      'approval', 1, ?, 'awaiting_download')`)
     .bind(
       `instagram:${messageId}`,
       `instagram:${senderId}`,
@@ -2131,7 +2163,21 @@ async function receiveDirectReel(
   if (!row?.id) {
     throw new Error("O Reel recebido pelo Direct não pôde ser registrado.");
   }
-  await requestDirectRights(senderId, row.id, env);
+  await createContentTargets(row.id, {
+    instagramEnabled: true,
+    youtubeEnabled: false,
+    rightsBasis: "licensed",
+    context: `Recebido por Instagram Direct de @${directAllowedUsername(env)} com autorização permanente.`,
+    madeForKids: false,
+    containsSyntheticMedia: false,
+    paidProductPlacement: false,
+  }, env);
+  await sendInstagramDirectMessage(senderId, {
+    text: `Reel #${row.id} recebido. A autorização permanente foi aplicada e o MP4 será preparado agora.`,
+  }, env);
+  const record = await reelById(row.id, env);
+  if (!record) throw new Error("O Reel recebido pelo Direct não pôde ser recarregado.");
+  await processReel(record, env, baseUrl);
   return row.id;
 }
 
@@ -2412,6 +2458,68 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     }
     const accepted = await startInsightRefresh(env, ctx);
     return json({ accepted, already_running: !accepted }, { status: 202 });
+  }
+
+  if (url.pathname === "/api/shortcut/access" && request.method === "POST") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    const token = newShortcutToken();
+    await env.DB.prepare(`INSERT INTO shortcut_access (id, token_hash, created_at, revoked_at)
+      VALUES (1, ?, CURRENT_TIMESTAMP, NULL)
+      ON CONFLICT(id) DO UPDATE SET token_hash = excluded.token_hash,
+        created_at = CURRENT_TIMESTAMP, last_used_at = NULL, revoked_at = NULL`)
+      .bind(await shortcutTokenHash(token))
+      .run();
+    return json({
+      token,
+      endpoint: `${baseUrl}/api/shortcut/intake`,
+      warning: "Este token é exibido uma única vez. Guarde-o somente no Atalho do iPhone.",
+    });
+  }
+
+  if (url.pathname === "/api/shortcut/access" && request.method === "DELETE") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    await env.DB.prepare(
+      "UPDATE shortcut_access SET revoked_at = CURRENT_TIMESTAMP WHERE id = 1",
+    ).run();
+    return json({ revoked: true });
+  }
+
+  if (url.pathname === "/api/shortcut/intake" && request.method === "POST") {
+    if (!await validShortcutRequest(request, env)) {
+      return json({ error: "Acesso do Atalho inválido ou revogado." }, { status: 401 });
+    }
+    const data = await request.json().catch(() => ({})) as {
+      url?: string;
+      rightsBasis?: "owned" | "licensed";
+      sourceAccount?: string;
+    };
+    const sourceUrl = findInstagramUrl(data.url);
+    if (!sourceUrl) return json({ error: "O compartilhamento não contém um link válido de Reel." }, { status: 400 });
+    const rightsBasis = data.rightsBasis === "owned" ? "owned" : "licensed";
+    const result = await queueReel({
+      messageId: `shortcut-${crypto.randomUUID()}`,
+      senderId: "ios-shortcut:nelmirjr",
+      sourceUrl,
+      rules: "fixed_cover_caption",
+      sourceAccount: sanitizeText(data.sourceAccount, 80),
+      rightsConfirmed: true,
+      publicationMode: "approval",
+      shareToFeed: true,
+      targets: {
+        instagramEnabled: true,
+        youtubeEnabled: false,
+        rightsBasis,
+        context: "Recebido pelo Atalho privado do iPhone.",
+        madeForKids: false,
+        containsSyntheticMedia: false,
+        paidProductPlacement: false,
+      },
+    }, env, ctx);
+    return json(result, {
+      status: result.accepted ? 202 : result.reason === "duplicate" ? 200 : 400,
+    });
   }
 
   if (url.pathname === "/api/reels/intake" && request.method === "POST") {

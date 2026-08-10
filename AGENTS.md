@@ -23,11 +23,11 @@ consultar Insights da conta `@btsupply_`.
 
 O fluxo operacional atual é:
 
-1. O usuário envia um link pelo ReelVolt no iPhone/PWA ou compartilha um Reel
-   de `@nelmirjr` para o Direct de `@btsupply_`.
-2. O serviço valida o usuário, a URL, a assinatura do webhook e a confirmação
-   dos direitos de uso. No Direct, somente o Instagram-scoped ID vinculado ao
-   username `@nelmirjr` é aceito.
+1. O usuário envia um link pelo ReelVolt no iPhone/PWA, pelo Atalho privado do
+   iPhone ou compartilha um Reel de `@nelmirjr` para o Direct de `@btsupply_`.
+2. O serviço valida o usuário, a URL e a origem autenticada. No Direct, valida
+   também a assinatura do webhook e aceita somente o Instagram-scoped ID
+   vinculado ao username `@nelmirjr`.
 3. O vídeo é obtido diretamente quando possível; uma instância privada ou
    licenciada do Cobalt pode ser usada como fallback.
 4. O MP4 é armazenado no R2, enquanto estados, preferências, identificadores e
@@ -45,6 +45,13 @@ executores ou métricas do YouTube sem uma nova solicitação explícita do usu�
 Notion e Telegram não fazem parte do fluxo operacional atual. O Direct do
 Instagram foi reativado exclusivamente como entrada autenticada para
 `@nelmirjr`; ele não substitui a aprovação individual no ReelVolt.
+
+Em 10 de agosto de 2026, o usuário concedeu autorização permanente para
+baixar, editar e preparar todo conteúdo enviado por ele pelos canais privados
+autenticados do ReelVolt. Essa autorização elimina confirmações repetidas de
+direitos, mas não elimina a aprovação final individual de publicação. O
+Direct ainda depende da publicação do aplicativo e da liberação do webhook
+pela Meta; até isso ocorrer, use o Atalho privado do iPhone.
 
 ## Fontes de verdade
 
@@ -78,7 +85,8 @@ ou outro bucket R2 por conveniência.
 ## Segurança, direitos e uso aceitável
 
 - Aceite somente vídeos próprios, licenciados ou autorizados pelo titular.
-- Preserve a confirmação explícita de direitos no fluxo de entrada.
+- Preserve o registro da autorização permanente nos canais privados e a
+  aprovação final explícita de cada publicação.
 - Não contorne contas privadas, autenticação, bloqueios de acesso ou medidas de
   proteção do Instagram.
 - Não automatize sites ou APIs cujos termos proíbam bots, scraping ou downloads

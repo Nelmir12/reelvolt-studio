@@ -119,6 +119,14 @@ export const instagramInsightSync = sqliteTable("instagram_insight_sync", {
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
+export const shortcutAccess = sqliteTable("shortcut_access", {
+  id: integer("id").primaryKey(),
+  tokenHash: text("token_hash").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  lastUsedAt: text("last_used_at"),
+  revokedAt: text("revoked_at"),
+});
+
 export const youtubeAuth = sqliteTable("youtube_auth", {
   id: integer("id").primaryKey(),
   refreshTokenCipher: text("refresh_token_cipher").notNull(),

@@ -74,6 +74,11 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   ]);
 
   assert.match(worker, /\/api\/reels\/intake/);
+  assert.match(worker, /\/api\/shortcut\/intake/);
+  assert.match(worker, /\/api\/shortcut\/access/);
+  assert.match(worker, /shortcutTokenHash/);
+  assert.match(worker, /token_hash/);
+  assert.doesNotMatch(worker, /INSERT INTO shortcut_access \(id, token,/);
   assert.match(worker, /oai-authenticated-user-email/i);
   assert.match(worker, /INBOX_ALLOWED_EMAILS/);
   assert.match(worker, /rightsConfirmed/);
@@ -98,7 +103,7 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.doesNotMatch(worker, /VALUES \(\?, \?, \?, \?, \?, \?, \?, \?, \?, \?, \?, CURRENT_TIMESTAMP\)/);
   const analyticsRoute = worker.slice(
     worker.indexOf('url.pathname === \"\/api\/analytics\"'),
-    worker.indexOf('url.pathname === \"\/api\/reels\/intake\"'),
+    worker.indexOf('url.pathname === \"\/api\/shortcut\/access\"'),
   );
   assert.doesNotMatch(analyticsRoute, /youtube|refreshAllInsights/i);
   const scheduledHandler = worker.slice(worker.indexOf("async scheduled("));
@@ -118,6 +123,7 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(worker, /DIRECT_RIGHTS_PAYLOAD/);
   assert.match(worker, /INSTAGRAM_DIRECT_ALLOWED_USERNAME/);
   assert.match(worker, /sendDirectApprovalButton/);
+  assert.match(worker, /autorização permanente/i);
   assert.match(worker, /instagram_business_manage_messages|subscribed_fields/);
   assert.match(worker, /messaging_type: "RESPONSE"/);
   assert.match(worker, /record\.sender_id\.startsWith\("instagram:"\)/);
@@ -140,6 +146,8 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(inbox, /Aprovar para a fila/);
   assert.match(inbox, /Autorizar publicação/);
   assert.match(inbox, /Recebido pelo Direct/);
+  assert.match(inbox, /Atalho do iPhone/);
+  assert.match(inbox, /Autorização permanente registrada/);
   assert.match(inbox, /APROVAÇÃO DO INSTAGRAM/);
   assert.match(inbox, /MP4 pronto/);
   assert.match(inbox, /Publicado no Instagram/);
@@ -158,4 +166,5 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(readme, /experimento de publicação no YouTube foi retirado/);
   assert.match(readme, /instagram_business_manage_messages/);
   assert.match(readme, /X-Hub-Signature-256/);
+  assert.match(readme, /Atalho privado do iPhone/);
 });

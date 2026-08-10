@@ -52,9 +52,11 @@ da Meta e do resolvedor podem aparecer desconectados localmente.
 ## 5. Arquitetura atual
 
 - O fluxo operacional publica somente no Instagram pela API oficial da Meta.
-- O Direct do Instagram é uma entrada ativa: somente `@nelmirjr` pode enviar
-  Reels para `@btsupply_`; a confirmação de direitos ocorre no Direct e a
-  autorização final de publicação ocorre no ReelVolt.
+- A autorização permanente de direitos vale para entradas privadas do painel,
+  do Atalho do iPhone e do Direct autenticado de `@nelmirjr`; a autorização
+  final de publicação continua individual no ReelVolt.
+- O Direct depende de o aplicativo e o webhook serem liberados pela Meta. Até
+  isso ocorrer, o Atalho privado do iPhone é a entrada automática recomendada.
 - O D1 guarda estados, preferências e Insights.
 - O R2 guarda vídeos e capas.
 - O histórico do experimento do YouTube permanece preservado, mas suas rotas,

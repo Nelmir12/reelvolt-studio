@@ -7,11 +7,12 @@ vídeos e as capas.
 
 ## Fluxo
 
-1. O usuário compartilha um Reel pelo PWA ou envia o Reel de `@nelmirjr` para o
-   Direct de `@btsupply_`.
-2. O site valida o usuário, a URL, a assinatura da Meta e a confirmação dos
-   direitos de uso. No Direct, somente o identificador vinculado a `@nelmirjr`
-   é aceito.
+1. O usuário compartilha um Reel pelo PWA, pelo Atalho privado do iPhone ou
+   envia o Reel de `@nelmirjr` para o Direct de `@btsupply_`.
+2. O site valida o usuário, a URL e a origem autenticada. A autorização
+   permanente concedida pelo proprietário se aplica somente a esses canais
+   privados; no Direct, a assinatura da Meta e o ID vinculado a `@nelmirjr`
+   continuam obrigatórios.
 3. O MP4 é obtido diretamente ou por um resolvedor privado/licenciado e fica
    armazenado uma única vez no R2.
 4. O usuário pode somente baixar o arquivo ou prepará-lo para aprovação. No
@@ -56,6 +57,9 @@ Com Instagram Login, o token precisa das permissões
 - `POST /api/instagram/direct/subscribe`: ativa `messages` e
   `messaging_postbacks` para a conta profissional.
 - `POST /api/reels/intake`: recebe um Reel e as opções do fluxo.
+- `POST|DELETE /api/shortcut/access`: gera ou revoga o acesso privado do Atalho.
+- `POST /api/shortcut/intake`: recebe a URL do iPhone com um token Bearer cujo
+  valor é mostrado uma única vez e armazenado somente como hash no D1.
 - `GET /api/reels`: lista todos os registros ativos, sem corte fixo por quantidade.
 - `DELETE /api/reels/:id`: remove o MP4 do R2 e arquiva o item; quando o Reel já
   foi publicado, preserva a publicação e todo o histórico de Insights.
@@ -110,14 +114,15 @@ Para continuar o projeto em outra máquina, consulte
 ## Entrada pelo Direct e alternativa gratuita
 
 O webhook aceita os tipos de compartilhamento que a Meta pode enviar para um
-post ou Reel (`share`, `media`, `video`, `ig_reel` e `reel`). Depois que
-`@nelmirjr` confirma os direitos pela resposta rápida, o MP4 é preparado sem
-outra ação e o Direct devolve o botão de aprovação no ReelVolt.
+post ou Reel (`share`, `media`, `video`, `ig_reel` e `reel`). Para `@nelmirjr`,
+a autorização permanente já registrada prepara o MP4 sem outra resposta e o
+Direct devolve o botão de aprovação no ReelVolt.
 
 Para uso restrito às próprias contas, mantenha `@nelmirjr` e `@btsupply_` como
 contas de teste/funções do aplicativo e conceda
 `instagram_business_manage_messages`; isso evita depender de acesso avançado
-destinado a usuários externos. Se a Meta não liberar os eventos reais nesse
-modo, a alternativa sem serviço pago continua sendo compartilhar/copiar o link
-para o ReelVolt instalado no iPhone. O link chega preenchido, e a confirmação
-de direitos permanece obrigatória antes do download.
+destinado a usuários externos. Enquanto o aplicativo não estiver publicado e o
+callback não estiver liberado pela Meta, o Direct não entrega eventos reais. A
+alternativa gratuita é o Atalho privado do iPhone: ele envia a URL diretamente
+ao ReelVolt e prepara o MP4. Em todos os canais, cada publicação ainda exige a
+aprovação final daquele Reel no painel.
