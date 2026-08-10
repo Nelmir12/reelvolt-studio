@@ -1489,6 +1489,7 @@ async function processReel(record: ReelRecord, env: Env, baseUrl?: string) {
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Falha desconhecida";
+    console.error(`Falha ao preparar o Reel #${record.id}: ${message}`);
     await env.DB.prepare(`UPDATE reels SET status = 'failed', error = ?,
       publish_status = CASE WHEN publication_mode = 'download_only' THEN 'not_requested' ELSE 'blocked' END
       WHERE id = ?`)
@@ -1746,6 +1747,38 @@ async function listReels(env: Env, baseUrl: string) {
     contains_synthetic_media: Boolean(row.contains_synthetic_media),
     paid_product_placement: Boolean(row.paid_product_placement),
   }));
+}
+
+async function listRecentFailedReels(env: Env) {
+  const { results } = await env.DB.prepare(`SELECT id, source_url, source_account, status, error,
+    publication_mode, publish_status, created_at
+    FROM reels
+    WHERE archived_at IS NULL AND status = 'failed'
+    ORDER BY id DESC LIMIT 5`).all<{
+      id: number;
+      source_url: string;
+      source_account: string | null;
+      status: string;
+      error: string | null;
+      publication_mode: "download_only" | "approval" | "auto";
+      publish_status: string;
+      created_at: string;
+    }>();
+  return results;
+}
+
+async function retryFailedReel(id: number, env: Env, ctx: ExecutionContext) {
+  const claimed = await env.DB.prepare(`UPDATE reels SET status = 'queued', error = NULL,
+    publish_status = CASE WHEN publication_mode = 'download_only' THEN 'not_requested' ELSE 'awaiting_download' END,
+    publish_error = NULL
+    WHERE id = ? AND archived_at IS NULL AND status = 'failed'`)
+    .bind(id)
+    .run();
+  if (!claimed.meta.changes) return false;
+  const record = await reelById(id, env);
+  if (!record) return false;
+  ctx.waitUntil(processReel(record, env));
+  return true;
 }
 
 async function archiveReelMedia(id: number, env: Env) {
@@ -2348,7 +2381,22 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     if (!validInboxUser(request, env) && !validAdmin(request, env)) {
       return json({ error: "Não autorizado." }, { status: 401 });
     }
-    return json({ reels: await listReels(env, baseUrl) });
+    const [reels, failedReels] = await Promise.all([
+      listReels(env, baseUrl),
+      listRecentFailedReels(env),
+    ]);
+    return json({ reels, failed_reels: failedReels });
+  }
+
+  const retryReelMatch = url.pathname.match(/^\/api\/reels\/(\d+)\/retry$/);
+  if (retryReelMatch && request.method === "POST") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    const accepted = await retryFailedReel(Number(retryReelMatch[1]), env, ctx);
+    if (!accepted) {
+      return json({ error: "Este Reel não está mais disponível para nova tentativa." }, { status: 409 });
+    }
+    return json({ accepted: true }, { status: 202 });
   }
 
   const deleteReelMatch = url.pathname.match(/^\/api\/reels\/(\d+)$/);

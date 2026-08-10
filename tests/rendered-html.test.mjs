@@ -74,6 +74,10 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   ]);
 
   assert.match(worker, /\/api\/reels\/intake/);
+  assert.match(worker, /retryReelMatch/);
+  assert.match(worker, /listRecentFailedReels/);
+  assert.match(worker, /retryFailedReel/);
+  assert.match(worker, /Falha ao preparar o Reel/);
   assert.match(worker, /\/api\/shortcut\/intake/);
   assert.match(worker, /\/api\/shortcut\/access/);
   assert.match(worker, /shortcutTokenHash/);
@@ -152,6 +156,8 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(inbox, /MP4 pronto/);
   assert.match(inbox, /Publicado no Instagram/);
   assert.match(inbox, /Excluir arquivo/);
+  assert.match(inbox, /Falhas recentes de preparação/);
+  assert.match(inbox, /Tentar novamente/);
   assert.match(inbox, /métricas foram preservadas/);
   assert.doesNotMatch(inbox, /YouTube|Shorts/);
   assert.match(inbox, /Como acompanhar/);

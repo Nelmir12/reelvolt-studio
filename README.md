@@ -57,6 +57,8 @@ Com Instagram Login, o token precisa das permissões
 - `POST /api/instagram/direct/subscribe`: ativa `messages` e
   `messaging_postbacks` para a conta profissional.
 - `POST /api/reels/intake`: recebe um Reel e as opções do fluxo.
+- `POST /api/reels/:id/retry`: recupera um download que falhou, sem duplicar o
+  registro nem alterar publicações e métricas existentes.
 - `POST|DELETE /api/shortcut/access`: gera ou revoga o acesso privado do Atalho.
 - `POST /api/shortcut/intake`: recebe a URL do iPhone com um token Bearer cujo
   valor é mostrado uma única vez e armazenado somente como hash no D1.
@@ -107,6 +109,8 @@ Para continuar o projeto em outra máquina, consulte
 - Não altere o `project_id` em `.openai/hosting.json`.
 - Não remova tabelas do D1 nem objetos do R2 como efeito colateral.
 - Nunca publique um Reel sem aprovação explícita para aquele item.
+- Falhas de download ficam fora da produção principal, mas aparecem em uma
+  área compacta com o erro e uma nova tentativa segura.
 - Nunca aceite um evento do Direct sem assinatura HMAC válida; o primeiro
   evento autorizado confere o username e fixa o Instagram-scoped ID de
   `@nelmirjr` no D1.

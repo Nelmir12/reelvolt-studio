@@ -1176,6 +1176,82 @@ select:focus-visible {
   color: var(--accent);
 }
 
+.failed-reels-panel {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+  border: 1px solid #efc1bd;
+  border-radius: 14px;
+  padding: 18px;
+  background: var(--danger-soft);
+}
+
+.failed-reels-panel > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.failed-reels-panel > div:first-child strong {
+  font-size: 11px;
+}
+
+.failed-reels-panel > div:first-child small,
+.failed-reels-list small {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.failed-reels-list {
+  display: grid;
+  gap: 8px;
+}
+
+.failed-reels-list article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--surface);
+}
+
+.failed-reels-list article > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.failed-reels-list article strong,
+.failed-reels-list article a {
+  overflow: hidden;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.failed-reels-list article a {
+  color: var(--accent);
+}
+
+.failed-reels-list button {
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.failed-reels-list button:disabled {
+  cursor: wait;
+  opacity: .6;
+}
+
 .action-danger {
   min-height: 32px;
   border: 1px solid #e3b6b6;

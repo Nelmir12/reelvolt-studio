@@ -183,6 +183,8 @@ mais recente.
   agendada; não bloqueie desnecessariamente a resposta HTTP.
 - Falhas externas devem gerar estados recuperáveis e mensagens úteis, sem
   revelar segredos ou respostas sensíveis do provedor.
+- Downloads com falha não ocupam a lista principal, mas devem permanecer
+  visíveis em uma área compacta de recuperação com erro e nova tentativa.
 - Downloads e publicações devem ser idempotentes sempre que possível. Preserve
   a detecção de duplicatas e impeça publicações duplicadas.
 - Não invente métricas indisponíveis. Mostre indisponibilidade ou erro de

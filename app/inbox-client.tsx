@@ -36,6 +36,10 @@ type Reel = {
   paid_product_placement: boolean;
 };
 
+type FailedReel = Pick<Reel,
+  "id" | "source_url" | "source_account" | "status" | "error" | "publication_mode" | "publish_status" | "created_at"
+>;
+
 type Dashboard = {
   metrics: {
     total: number;
@@ -224,6 +228,8 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
   const [containsSyntheticMedia, setContainsSyntheticMedia] = useState(false);
   const [paidProductPlacement, setPaidProductPlacement] = useState(false);
   const [reels, setReels] = useState<Reel[]>([]);
+  const [failedReels, setFailedReels] = useState<FailedReel[]>([]);
+  const [retryingId, setRetryingId] = useState<number | null>(null);
   const [dashboard, setDashboard] = useState<Dashboard>(EMPTY_DASHBOARD);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -261,9 +267,10 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
         fetch("/api/dashboard", { credentials: "same-origin", headers: { accept: "application/json" } }),
       ]);
       if (!reelsResponse.ok || !dashboardResponse.ok) throw new Error("Não foi possível carregar o painel.");
-      const reelsData = await reelsResponse.json() as { reels?: Reel[] };
+      const reelsData = await reelsResponse.json() as { reels?: Reel[]; failed_reels?: FailedReel[] };
       const dashboardData = await dashboardResponse.json() as Dashboard;
       setReels(reelsData.reels ?? []);
+      setFailedReels(reelsData.failed_reels ?? []);
       setDashboard(dashboardData);
       if (!settingsInitialized.current) {
         settingsInitialized.current = true;
@@ -405,6 +412,31 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
       paidProductPlacement: reel.paid_product_placement,
       rightsConfirmed: reel.intake_source === "instagram_direct" && reel.rights_confirmed,
     });
+  }
+
+  async function retryFailedReel(reel: FailedReel) {
+    setRetryingId(reel.id);
+    setNotice(null);
+    try {
+      const response = await fetch(`/api/reels/${reel.id}/retry`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+      const data = await response.json() as { accepted?: boolean; error?: string };
+      if (!response.ok || !data.accepted) {
+        throw new Error(data.error || "Não foi possível tentar o download novamente.");
+      }
+      setNotice({ tone: "success", text: `Nova tentativa iniciada para o Reel #${reel.id}.` });
+      await loadData(true);
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Não foi possível tentar novamente.",
+      });
+    } finally {
+      setRetryingId(null);
+    }
   }
 
   async function activateDirect() {
@@ -1087,6 +1119,29 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
           </>
         )}
       </section>
+
+      {failedReels.length ? (
+        <section className="failed-reels-panel" aria-labelledby="failed-reels-title">
+          <div>
+            <strong id="failed-reels-title">Falhas recentes de preparação</strong>
+            <small>Ficam fora da produção principal, mas podem ser recuperadas.</small>
+          </div>
+          <div className="failed-reels-list">
+            {failedReels.map((reel) => (
+              <article key={reel.id}>
+                <div>
+                  <strong>#{reel.id} · {reel.source_account || "Origem não informada"}</strong>
+                  <a href={reel.source_url} target="_blank" rel="noreferrer">{reel.source_url}</a>
+                  <small>{reel.error || "O download não foi concluído."}</small>
+                </div>
+                <button type="button" onClick={() => void retryFailedReel(reel)} disabled={retryingId === reel.id}>
+                  {retryingId === reel.id ? "Tentando…" : "Tentar novamente"}
+                </button>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       {approvalDraft ? (
         <div className="approval-overlay" role="presentation">
