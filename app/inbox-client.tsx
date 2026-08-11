@@ -230,6 +230,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
   const [reels, setReels] = useState<Reel[]>([]);
   const [failedReels, setFailedReels] = useState<FailedReel[]>([]);
   const [retryingId, setRetryingId] = useState<number | null>(null);
+  const [uploadingFailedId, setUploadingFailedId] = useState<number | null>(null);
   const [dashboard, setDashboard] = useState<Dashboard>(EMPTY_DASHBOARD);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -436,6 +437,37 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
       });
     } finally {
       setRetryingId(null);
+    }
+  }
+
+  async function uploadFailedReel(reel: FailedReel, file: File) {
+    setUploadingFailedId(reel.id);
+    setNotice(null);
+    try {
+      const isMp4 = file.type === "video/mp4"
+        || ((!file.type || file.type === "application/octet-stream") && /\.mp4$/i.test(file.name));
+      if (!isMp4) throw new Error("Selecione um arquivo MP4.");
+      if (file.size > 90 * 1024 * 1024) throw new Error("O MP4 deve ter no máximo 90 MB.");
+      const response = await fetch(`/api/reels/${reel.id}/media`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "content-type": file.type || "video/mp4",
+          "x-upload-filename": file.name.replace(/[^\x20-\x7E]/g, "_").slice(0, 160) || "video.mp4",
+        },
+        body: file,
+      });
+      const data = await response.json() as { ready?: boolean; error?: string };
+      if (!response.ok || !data.ready) throw new Error(data.error || "Não foi possível enviar o MP4.");
+      setNotice({ tone: "success", text: `MP4 enviado. O Reel #${reel.id} está pronto para aprovação.` });
+      await loadData(true);
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Não foi possível enviar o MP4.",
+      });
+    } finally {
+      setUploadingFailedId(null);
     }
   }
 
@@ -1134,9 +1166,28 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                   <a href={reel.source_url} target="_blank" rel="noreferrer">{reel.source_url}</a>
                   <small>{reel.error || "O download não foi concluído."}</small>
                 </div>
-                <button type="button" onClick={() => void retryFailedReel(reel)} disabled={retryingId === reel.id}>
-                  {retryingId === reel.id ? "Tentando…" : "Tentar novamente"}
-                </button>
+                <div className="failed-reel-actions">
+                  <button
+                    type="button"
+                    onClick={() => void retryFailedReel(reel)}
+                    disabled={retryingId === reel.id || uploadingFailedId === reel.id}
+                  >
+                    {retryingId === reel.id ? "Tentando…" : "Tentar novamente"}
+                  </button>
+                  <label className="failed-upload-button" aria-disabled={uploadingFailedId === reel.id}>
+                    {uploadingFailedId === reel.id ? "Enviando…" : "Enviar MP4"}
+                    <input
+                      type="file"
+                      accept="video/mp4,.mp4"
+                      disabled={retryingId === reel.id || uploadingFailedId === reel.id}
+                      onChange={(event) => {
+                        const file = event.currentTarget.files?.[0];
+                        event.currentTarget.value = "";
+                        if (file) void uploadFailedReel(reel, file);
+                      }}
+                    />
+                  </label>
+                </div>
               </article>
             ))}
           </div>

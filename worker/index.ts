@@ -3,14 +3,11 @@ import handler from "vinext/server/app-router-entry";
 import {
   YOUTUBE_SCHEMA_STATEMENTS,
   createContentTargets,
-  dispatchYouTubeExecutor,
-  handleYouTubeRequest,
   publicationDestinations,
-  queueYouTubePublication,
-  youtubeConnection,
   type ContentTargetInput,
   type YouTubeEnv,
 } from "./youtube";
+import { extractInstagramEmbedVideoUrl, instagramEmbedUrl } from "./instagram-embed";
 
 interface Env extends YouTubeEnv {
   ASSETS: Fetcher;
@@ -459,7 +456,7 @@ function sanitizeTargets(
     containsSyntheticMedia?: unknown;
     paidProductPlacement?: unknown;
   },
-  defaultDestinations: Array<"instagram" | "youtube">,
+  defaultDestinations: Array<"instagram">,
 ): ContentTargetInput {
   const requested = Array.isArray(destinations)
     ? destinations.filter((value): value is "instagram" => value === "instagram")
@@ -703,6 +700,32 @@ async function resolveVideo(sourceUrl: string, env: Env) {
         redirect: "follow",
       });
       if (response.ok && response.body) return { response };
+    }
+  }
+
+  const embedUrl = instagramEmbedUrl(sourceUrl);
+  if (embedUrl) {
+    const embed = await fetch(embedUrl, {
+      headers: {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        accept: "text/html,application/xhtml+xml",
+        "accept-language": "en-US,en;q=0.9",
+      },
+      redirect: "follow",
+    });
+    if (embed.ok) {
+      const videoUrl = extractInstagramEmbedVideoUrl(await embed.text());
+      if (videoUrl) {
+        const response = await fetch(videoUrl, {
+          headers: {
+            referer: embedUrl,
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+          },
+          redirect: "follow",
+        });
+        if (response.ok && response.body) return { response };
+        resolverFailure = `arquivo público retornado com HTTP ${response.status}`;
+      }
     }
   }
 
@@ -1556,15 +1579,6 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
   const caption = settings.caption_enabled ? settings.default_caption.trim() : "";
   const coverKey = settings.cover_mode === "fixed" ? settings.fixed_cover_key : null;
   const destinations = await publicationDestinations(record.id, env);
-  const youtube = await queueYouTubePublication(
-    record.id,
-    record.source_account,
-    Boolean(record.rights_confirmed),
-    env,
-  );
-  if (youtube.status === "queued") {
-    ctx.waitUntil(dispatchYouTubeExecutor(env));
-  }
 
   if (!destinations.instagram) {
     await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
@@ -1573,7 +1587,7 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
       WHERE id = ?`)
       .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, record.id)
       .run();
-    return { queued: false, scheduledFor: null, youtube };
+    return { queued: false, scheduledFor: null };
   }
 
   if (!metaConnected(env)) {
@@ -1584,7 +1598,7 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
       WHERE id = ?`)
       .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, record.id)
       .run();
-    return { queued: false, scheduledFor: null, youtube };
+    return { queued: false, scheduledFor: null };
   }
 
   const usesScheduledQueue = Boolean(settings.auto_publish_enabled)
@@ -1598,7 +1612,7 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
       WHERE id = ?`)
       .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, scheduledFor, record.id)
       .run();
-    return { queued: true, scheduledFor, youtube };
+    return { queued: true, scheduledFor };
   }
 
   await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
@@ -1611,7 +1625,7 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
   const approved = await reelById(record.id, env);
   if (!approved) throw new Error("O Reel aprovado não pôde ser recarregado.");
   ctx.waitUntil(publishReel(approved, env, baseUrl));
-  return { queued: false, scheduledFor: null, youtube };
+  return { queued: false, scheduledFor: null };
 }
 
 async function processPublicationQueue(env: Env, baseUrl: string) {
@@ -1779,6 +1793,74 @@ async function retryFailedReel(id: number, env: Env, ctx: ExecutionContext) {
   if (!record) return false;
   ctx.waitUntil(processReel(record, env));
   return true;
+}
+
+async function uploadFailedReelMedia(
+  id: number,
+  body: ReadableStream,
+  upload: { type: string; name: string; declaredSize: number | null },
+  request: Request,
+  env: Env,
+) {
+  const isMp4 = upload.type === "video/mp4"
+    || ((!upload.type || upload.type === "application/octet-stream") && /\.mp4$/i.test(upload.name));
+  if (!isMp4) {
+    return { error: "Selecione um arquivo MP4.", status: 415 } as const;
+  }
+  if (upload.declaredSize === 0) return { error: "O arquivo MP4 está vazio.", status: 400 } as const;
+  if (upload.declaredSize != null && upload.declaredSize > 90 * 1024 * 1024) {
+    return { error: "O MP4 deve ter no máximo 90 MB.", status: 413 } as const;
+  }
+
+  const record = await env.DB.prepare(`SELECT id, source_url, source_account, rights_confirmed,
+    rules, publication_mode FROM reels
+    WHERE id = ? AND archived_at IS NULL AND status = 'failed'`)
+    .bind(id)
+    .first<Pick<ReelRecord,
+      "id" | "source_url" | "source_account" | "rights_confirmed" | "rules" | "publication_mode"
+    >>();
+  if (!record) {
+    return { error: "Este Reel não está mais disponível para receber um MP4.", status: 409 } as const;
+  }
+
+  const storageKey = `reels/${record.id}-${crypto.randomUUID()}.mp4`;
+  try {
+    await env.VIDEOS.put(storageKey, body, {
+      httpMetadata: { contentType: "video/mp4" },
+      customMetadata: {
+        sourceUrl: record.source_url,
+        sourceAccount: (record.source_account || "").slice(0, 128),
+        rightsConfirmed: String(Boolean(record.rights_confirmed)),
+        rules: (record.rules || "").slice(0, 1024),
+        uploadedBy: authenticatedEmail(request).slice(0, 160),
+        originalName: upload.name.slice(0, 160),
+      },
+    });
+    const stored = await env.VIDEOS.head(storageKey);
+    if (!stored?.size) throw new Error("O arquivo não foi confirmado no armazenamento.");
+    if (stored.size > 90 * 1024 * 1024) {
+      await env.VIDEOS.delete(storageKey);
+      return { error: "O MP4 deve ter no máximo 90 MB.", status: 413 } as const;
+    }
+    const publishStatus = record.publication_mode === "download_only" ? "not_requested" : "awaiting_approval";
+    const updated = await env.DB.prepare(`UPDATE reels SET status = 'ready', storage_key = ?, filename = ?, content_type = 'video/mp4',
+      size_bytes = ?, completed_at = CURRENT_TIMESTAMP, error = NULL, publish_status = ?, publish_error = NULL
+      WHERE id = ? AND status = 'failed'`)
+      .bind(storageKey, `reel-${record.id}.mp4`, stored.size, publishStatus, record.id)
+      .run();
+    if (!updated.meta.changes) {
+      await env.VIDEOS.delete(storageKey);
+      return { error: "Este Reel já está sendo processado.", status: 409 } as const;
+    }
+    return { ready: true as const };
+  } catch (error) {
+    await env.VIDEOS.delete(storageKey).catch(() => undefined);
+    const message = error instanceof Error ? error.message : "Falha ao armazenar o MP4.";
+    await env.DB.prepare("UPDATE reels SET error = ? WHERE id = ? AND status = 'failed'")
+      .bind(message.slice(0, 500), id)
+      .run();
+    return { error: message, status: 500 } as const;
+  }
 }
 
 async function archiveReelMedia(id: number, env: Env) {
@@ -2343,12 +2425,10 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
 
   await ensureDatabase(env);
   const baseUrl = publicBaseUrl(request.url, env);
-  const youtubeResponse = await handleYouTubeRequest(request, env, {
-    userEmail: authenticatedEmail(request),
-    validUser: validInboxUser(request, env),
-    validOrigin: validWriteOrigin(request),
-  });
-  if (youtubeResponse) return youtubeResponse;
+
+  if (/^\/(?:api\/youtube|api\/internal\/youtube|api\/reels\/\d+\/youtube|worker-media)\b/.test(url.pathname)) {
+    return json({ error: "A publicação no YouTube foi retirada do ReelVolt." }, { status: 410 });
+  }
 
   if (publishMediaMatch && (request.method === "GET" || request.method === "HEAD")) {
     const reelId = Number(publishMediaMatch[1]);
@@ -2397,6 +2477,22 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       return json({ error: "Este Reel não está mais disponível para nova tentativa." }, { status: 409 });
     }
     return json({ accepted: true }, { status: 202 });
+  }
+
+  const uploadReelMediaMatch = url.pathname.match(/^\/api\/reels\/(\d+)\/media$/);
+  if (uploadReelMediaMatch && request.method === "POST") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    if (!request.body) return json({ error: "Selecione um arquivo MP4." }, { status: 400 });
+    const declaredSizeHeader = request.headers.get("content-length");
+    const declaredSizeValue = declaredSizeHeader == null ? Number.NaN : Number(declaredSizeHeader);
+    const result = await uploadFailedReelMedia(Number(uploadReelMediaMatch[1]), request.body, {
+      type: (request.headers.get("content-type") || "").split(";")[0].trim().toLowerCase(),
+      name: (request.headers.get("x-upload-filename") || "video.mp4").slice(0, 160),
+      declaredSize: Number.isFinite(declaredSizeValue) ? declaredSizeValue : null,
+    }, request, env);
+    if ("error" in result) return json({ error: result.error }, { status: result.status });
+    return json({ ready: true }, { status: 201 });
   }
 
   const deleteReelMatch = url.pathname.match(/^\/api\/reels\/(\d+)$/);
@@ -2580,7 +2676,7 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       rightsConfirmed?: boolean;
       publicationMode?: string;
       shareToFeed?: boolean;
-      destinations?: Array<"instagram" | "youtube">;
+      destinations?: Array<"instagram">;
       rightsBasis?: "owned" | "licensed";
       context?: string;
       madeForKids?: boolean;
@@ -2618,7 +2714,7 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     if (record.status !== "ready") return json({ error: "O MP4 ainda não está pronto." }, { status: 409 });
     const data = await request.json().catch(() => ({})) as {
       rightsConfirmed?: boolean;
-      destinations?: Array<"instagram" | "youtube">;
+      destinations?: Array<"instagram">;
       rightsBasis?: "owned" | "licensed";
       context?: string;
       madeForKids?: boolean;
@@ -2627,57 +2723,20 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     };
     if (Array.isArray(data.destinations)) {
       const targets = sanitizeTargets(data.destinations, data, []);
-      if (!targets.instagramEnabled && !targets.youtubeEnabled) {
-        return json({ error: "Selecione Instagram, YouTube ou ambos." }, { status: 400 });
+      if (!targets.instagramEnabled) {
+        return json({ error: "Selecione o Instagram." }, { status: 400 });
       }
       if (data.rightsConfirmed !== true) {
         return json({ error: "Confirme os direitos antes de aprovar os destinos." }, { status: 400 });
       }
       await createContentTargets(record.id, targets, env);
     }
-    const destinations = await publicationDestinations(record.id, env);
     if (record.publish_status === "published") {
-      if (!destinations.youtube) {
-        return json({ error: "Este Reel já foi publicado no Instagram." }, { status: 409 });
-      }
-      const currentYouTube = await env.DB.prepare(
-        "SELECT status FROM youtube_publications WHERE reel_id = ?",
-      ).bind(record.id).first<{ status: string }>();
-      if (currentYouTube?.status === "published") {
-        return json({ error: "Este Reel já foi publicado no Instagram e no YouTube." }, { status: 409 });
-      }
-      const youtube = await queueYouTubePublication(
-        record.id,
-        record.source_account,
-        Boolean(record.rights_confirmed),
-        env,
-      );
-      if (youtube.status === "queued") {
-        ctx.waitUntil(dispatchYouTubeExecutor(env));
-      }
-      await env.DB.prepare(
-        "UPDATE reels SET approved_at = COALESCE(approved_at, CURRENT_TIMESTAMP) WHERE id = ?",
-      ).bind(record.id).run();
-      return json({
-        accepted: true,
-        id: record.id,
-        queued: false,
-        instagramAlreadyPublished: true,
-        youtube,
-      }, { status: 202 });
+      return json({ error: "Este Reel já foi publicado no Instagram." }, { status: 409 });
     }
     if (["creating", "processing", "publishing"].includes(record.publish_status)) {
-      const youtube = await queueYouTubePublication(
-        record.id,
-        record.source_account,
-        Boolean(record.rights_confirmed),
-        env,
-      );
-      if (youtube.status === "queued") {
-        ctx.waitUntil(dispatchYouTubeExecutor(env));
-      }
       ctx.waitUntil(publishReel(record, env, baseUrl));
-      return json({ accepted: true, id: record.id, queued: false, youtube }, { status: 202 });
+      return json({ accepted: true, id: record.id, queued: false }, { status: 202 });
     }
     const result = await approveReel(record, env, baseUrl, ctx);
     return json({ accepted: true, id: record.id, ...result }, { status: 202 });
@@ -2694,7 +2753,6 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     return json({
       user: authenticatedEmail(request),
       instagram: metaConnected(env),
-      youtube: await youtubeConnection(env),
       resolver: Boolean(env.REEL_RESOLVER_URL),
       storage: true,
     });
@@ -2709,7 +2767,6 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
         userId: Boolean(env.INSTAGRAM_USER_ID),
         apiVersion: env.INSTAGRAM_API_VERSION || null,
       },
-      youtube: await youtubeConnection(env),
       resolver: Boolean(env.REEL_RESOLVER_URL),
       storage: true,
     });
@@ -2723,7 +2780,7 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       sourceAccount?: string;
       publicationMode?: string;
       shareToFeed?: boolean;
-      destinations?: Array<"instagram" | "youtube">;
+      destinations?: Array<"instagram">;
       rightsBasis?: "owned" | "licensed";
       context?: string;
       madeForKids?: boolean;

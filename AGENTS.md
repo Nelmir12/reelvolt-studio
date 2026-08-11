@@ -29,7 +29,9 @@ O fluxo operacional atual é:
    também a assinatura do webhook e aceita somente o Instagram-scoped ID
    vinculado ao username `@nelmirjr`.
 3. O vídeo é obtido diretamente quando possível; uma instância privada ou
-   licenciada do Cobalt pode ser usada como fallback.
+   licenciada do Cobalt pode ser usada como fallback. Quando o Instagram não
+   fornecer o MP4 publicamente, o mesmo registro aceita um upload manual de MP4
+   sem alterar métricas ou aprovações existentes.
 4. O MP4 é armazenado no R2, enquanto estados, preferências, identificadores e
    métricas ficam no D1.
 5. Reels destinados à publicação aguardam aprovação humana. No fluxo do Direct,

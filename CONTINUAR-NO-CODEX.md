@@ -59,6 +59,8 @@ da Meta e do resolvedor podem aparecer desconectados localmente.
   isso ocorrer, o Atalho privado do iPhone é a entrada automática recomendada.
 - O D1 guarda estados, preferências e Insights.
 - O R2 guarda vídeos e capas.
+- Itens cujo download automático falhar aceitam um MP4 de até 90 MB no próprio
+  registro, sem duplicar o Reel nem alterar métricas existentes.
 - O histórico do experimento do YouTube permanece preservado, mas suas rotas,
   interface e executor estão desativados.
 - Notion e Telegram não fazem parte do fluxo.

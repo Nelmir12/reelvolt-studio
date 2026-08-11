@@ -1236,7 +1236,15 @@ select:focus-visible {
   color: var(--accent);
 }
 
-.failed-reels-list button {
+.failed-reel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.failed-reels-list button,
+.failed-upload-button {
   border: 1px solid var(--danger);
   border-radius: 8px;
   padding: 8px 10px;
@@ -1247,7 +1255,17 @@ select:focus-visible {
   font-weight: 750;
 }
 
-.failed-reels-list button:disabled {
+.failed-upload-button {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.failed-upload-button input {
+  display: none;
+}
+
+.failed-reels-list button:disabled,
+.failed-upload-button[aria-disabled="true"] {
   cursor: wait;
   opacity: .6;
 }

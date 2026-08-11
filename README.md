@@ -13,8 +13,9 @@ vídeos e as capas.
    permanente concedida pelo proprietário se aplica somente a esses canais
    privados; no Direct, a assinatura da Meta e o ID vinculado a `@nelmirjr`
    continuam obrigatórios.
-3. O MP4 é obtido diretamente ou por um resolvedor privado/licenciado e fica
-   armazenado uma única vez no R2.
+3. O MP4 é obtido diretamente, pelo embed público compatível ou por um
+   resolvedor privado/licenciado. Se o Instagram bloquear todos esses caminhos,
+   o mesmo item aceita o envio manual de um MP4 e fica armazenado uma única vez no R2.
 4. O usuário pode somente baixar o arquivo ou prepará-lo para aprovação. No
    fluxo do Direct, recebe um botão que abre exatamente o Reel preparado.
 5. Após a aprovação explícita, o Reel é publicado pela API oficial da Meta,
@@ -59,6 +60,8 @@ Com Instagram Login, o token precisa das permissões
 - `POST /api/reels/intake`: recebe um Reel e as opções do fluxo.
 - `POST /api/reels/:id/retry`: recupera um download que falhou, sem duplicar o
   registro nem alterar publicações e métricas existentes.
+- `POST /api/reels/:id/media`: recebe um MP4 de até 90 MB para recuperar um
+  item cujo download automático falhou, preservando o mesmo registro.
 - `POST|DELETE /api/shortcut/access`: gera ou revoga o acesso privado do Atalho.
 - `POST /api/shortcut/intake`: recebe a URL do iPhone com um token Bearer cujo
   valor é mostrado uma única vez e armazenado somente como hash no D1.
