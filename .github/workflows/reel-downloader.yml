@@ -1,0 +1,95 @@
+name: Prepare Instagram Reel
+
+on:
+  workflow_dispatch:
+    inputs:
+      reel_id:
+        description: ReelVolt record ID
+        required: true
+        type: string
+      source_url:
+        description: Public Instagram Reel URL
+        required: true
+        type: string
+      callback_url:
+        description: ReelVolt result endpoint
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reel-download-${{ inputs.reel_id }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Start isolated Cobalt
+        run: |
+          docker run --detach --rm --name reelvolt-cobalt \
+            --publish 127.0.0.1:9000:9000 \
+            --env API_URL=http://127.0.0.1:9000/ \
+            ghcr.io/nelmir12/cobalt:latest
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:9000/ >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs reelvolt-cobalt
+          exit 1
+
+      - name: Resolve and download MP4
+        env:
+          SOURCE_URL: ${{ inputs.source_url }}
+        run: |
+          request=$(jq -cn --arg url "$SOURCE_URL" '{url:$url,downloadMode:"auto",filenameStyle:"basic",videoQuality:"max"}')
+          response=$(curl --fail-with-body --silent --show-error \
+            --header 'Accept: application/json' \
+            --header 'Content-Type: application/json' \
+            --data "$request" http://127.0.0.1:9000/)
+          status=$(jq -r '.status // empty' <<<"$response")
+          media_url=$(jq -r '.url // .videoUrl // .download_url // .tunnel[0] // empty' <<<"$response")
+          if [[ "$status" != "redirect" && "$status" != "tunnel" ]] || [[ -z "$media_url" ]]; then
+            jq -c '{status,error}' <<<"$response"
+            exit 1
+          fi
+          curl --fail --location --retry 3 --retry-all-errors \
+            --max-filesize 94371840 --output reel.mp4 "$media_url"
+          test -s reel.mp4
+          test "$(stat --format=%s reel.mp4)" -le 94371840
+
+      - name: Return MP4 to ReelVolt
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          PRIMARY_WORKER_SECRET: ${{ secrets.REEL_DOWNLOAD_WORKER_SECRET }}
+          LEGACY_WORKER_SECRET: ${{ secrets.YOUTUBE_WORKER_SECRET }}
+        run: |
+          WORKER_SECRET="${PRIMARY_WORKER_SECRET:-$LEGACY_WORKER_SECRET}"
+          test -n "$WORKER_SECRET"
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer $WORKER_SECRET" \
+            --header 'Content-Type: video/mp4' \
+            --data-binary @reel.mp4 "$CALLBACK_URL"
+
+      - name: Report a recoverable failure
+        if: failure()
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          PRIMARY_WORKER_SECRET: ${{ secrets.REEL_DOWNLOAD_WORKER_SECRET }}
+          LEGACY_WORKER_SECRET: ${{ secrets.YOUTUBE_WORKER_SECRET }}
+        run: |
+          WORKER_SECRET="${PRIMARY_WORKER_SECRET:-$LEGACY_WORKER_SECRET}"
+          if [[ -n "$WORKER_SECRET" ]]; then
+            curl --silent --show-error \
+              --request POST \
+              --header "Authorization: Bearer $WORKER_SECRET" \
+              --header 'Content-Type: application/json' \
+              --data '{"error":"O executor alternativo também foi bloqueado pelo Instagram. Tente novamente mais tarde."}' \
+              "$CALLBACK_URL" || true
+          fi

@@ -26,20 +26,19 @@ type Reel = {
   created_at: string;
   completed_at: string | null;
   published_at: string | null;
-  youtube: {
-    status: string;
-    error: string | null;
-    title: string | null;
-    description: string | null;
-    tags: string[];
-    video_id: string | null;
-    video_url: string | null;
-    studio_url: string | null;
-    privacy_status: string;
-    warning_long_claim: boolean;
-    checks_confirmed_at: string | null;
-  } | null;
+  instagram_selected: boolean;
+  rights_confirmed: boolean;
+  intake_source: "instagram_direct" | "web";
+  rights_basis: "owned" | "licensed" | null;
+  content_context: string | null;
+  made_for_kids: boolean;
+  contains_synthetic_media: boolean;
+  paid_product_placement: boolean;
 };
+
+type FailedReel = Pick<Reel,
+  "id" | "source_url" | "source_account" | "status" | "error" | "publication_mode" | "publish_status" | "created_at"
+>;
 
 type Dashboard = {
   metrics: {
@@ -51,13 +50,12 @@ type Dashboard = {
     failed: number;
     stored_bytes: number;
     last_seven_days: number;
-    youtube_processing: number;
-    youtube_awaiting_checks: number;
-    youtube_published: number;
-    youtube_failed: number;
   };
   settings: {
     meta_connected: boolean;
+    direct_configured: boolean;
+    direct_allowed_username: string | null;
+    shortcut_configured: boolean;
     resolver_connected: boolean;
     cover_url: string;
     caption: string;
@@ -68,13 +66,6 @@ type Dashboard = {
     publish_interval_minutes: number;
     updated_at: string;
     account: string;
-    youtube: {
-      configured: boolean;
-      connected: boolean;
-      audited: boolean;
-      channel_id: string | null;
-      channel_title: string | null;
-    };
   };
 };
 
@@ -89,42 +80,83 @@ const INSTAGRAM_URL = /https?:\/\/(?:www\.)?instagram\.com\/(?:reel|reels|p)\/[A
 const REELS_PER_PAGE = 6;
 
 const DOWNLOAD_LABELS: Record<string, string> = {
+  awaiting_rights: "Aguardando direitos",
   queued: "Na fila",
   downloading: "Baixando",
   ready: "MP4 pronto",
   failed: "Falhou",
 };
 
-const PUBLISH_LABELS: Record<string, string> = {
-  not_requested: "Publicação disponível",
-  awaiting_download: "Aguardando MP4",
-  awaiting_approval: "Aguardando aprovação",
-  awaiting_setup: "Aguardando conexão",
-  queued: "Publicação na fila",
-  creating: "Criando publicação",
-  processing: "Meta processando",
-  publishing: "Publicando",
-  published: "Publicado",
-  failed: "Falha ao publicar",
-  blocked: "Bloqueado pelo download",
-  awaiting_metadata: "Gerando metadados",
+type ApprovalDraft = {
+  reel: Reel;
+  instagram: boolean;
+  rightsBasis: "owned" | "licensed";
+  context: string;
+  madeForKids: boolean;
+  containsSyntheticMedia: boolean;
+  paidProductPlacement: boolean;
+  rightsConfirmed: boolean;
 };
 
-const YOUTUBE_LABELS: Record<string, string> = {
-  awaiting_approval: "Aguardando aprovação",
-  awaiting_setup: "Aguardando conexão",
-  queued: "Na fila do YouTube",
-  dispatched: "Executor gratuito acionado",
-  retrying: "Retry programado",
-  preflight: "Validando formato",
-  analyzing: "Analisando conteúdo",
-  uploading: "Enviando privado",
-  processing: "YouTube processando",
-  awaiting_studio_check: "Conferir checks no Studio",
-  published: "Short público",
-  failed: "Falha no YouTube",
-  blocked: "YouTube bloqueado",
+type PlatformProgress = {
+  title: string;
+  detail: string;
+  tone: "waiting" | "active" | "success" | "danger";
 };
+
+function instagramProgress(reel: Reel): PlatformProgress {
+  if (reel.publish_status === "published" || reel.instagram_permalink) {
+    return {
+      title: "Publicado no Instagram",
+      detail: reel.published_at
+        ? `Publicado em ${formatDate(reel.published_at)}.`
+        : "A publicação já está disponível no Instagram.",
+      tone: "success",
+    };
+  }
+  if (reel.publish_status === "awaiting_metadata") {
+    return {
+      title: "Ainda não foi publicado",
+      detail: "A aprovação foi salva, mas o envio não começou. Use “Continuar publicação”.",
+      tone: "waiting",
+    };
+  }
+  if (reel.publish_status === "queued") {
+    return {
+      title: reel.scheduled_for ? "Publicação agendada" : "Na fila do Instagram",
+      detail: reel.scheduled_for
+        ? `Programado para ${formatDate(reel.scheduled_for)}.`
+        : "O envio será iniciado em seguida.",
+      tone: "active",
+    };
+  }
+  if (["creating", "processing", "publishing"].includes(reel.publish_status)) {
+    return {
+      title: "Publicando no Instagram",
+      detail: "A Meta está recebendo e processando o Reel.",
+      tone: "active",
+    };
+  }
+  if (["failed", "blocked"].includes(reel.publish_status)) {
+    return {
+      title: "Instagram precisa de atenção",
+      detail: reel.publish_error || "Confira o erro e tente continuar a publicação.",
+      tone: "danger",
+    };
+  }
+  if (reel.publish_status === "awaiting_setup") {
+    return {
+      title: "Aguardando conexão do Instagram",
+      detail: "Conecte a conta antes de publicar.",
+      tone: "waiting",
+    };
+  }
+  return {
+    title: "Aguardando sua aprovação",
+    detail: "Escolha os destinos e confirme os direitos para publicar.",
+    tone: "waiting",
+  };
+}
 
 const EMPTY_DASHBOARD: Dashboard = {
   metrics: {
@@ -136,13 +168,12 @@ const EMPTY_DASHBOARD: Dashboard = {
     failed: 0,
     stored_bytes: 0,
     last_seven_days: 0,
-    youtube_processing: 0,
-    youtube_awaiting_checks: 0,
-    youtube_published: 0,
-    youtube_failed: 0,
   },
   settings: {
     meta_connected: false,
+    direct_configured: false,
+    direct_allowed_username: null,
+    shortcut_configured: false,
     resolver_connected: false,
     cover_url: "/reel-cover.jpg",
     caption: "V arrived at #VogueWorld: Hollywood in unmistakable style, enjoying the live performances while showcasing the effortless elegance he's become known for. Another runway-worthy moment. #Taehyung",
@@ -153,13 +184,6 @@ const EMPTY_DASHBOARD: Dashboard = {
     publish_interval_minutes: 60,
     updated_at: "",
     account: "@btsupply_",
-    youtube: {
-      configured: false,
-      connected: false,
-      audited: false,
-      channel_id: null,
-      channel_title: null,
-    },
   },
 };
 
@@ -196,19 +220,23 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
   const [sourceAccount, setSourceAccount] = useState("");
   const [publicationMode, setPublicationMode] = useState<Reel["publication_mode"]>("approval");
   const [shareToFeed, setShareToFeed] = useState(true);
-  const [rightsConfirmed, setRightsConfirmed] = useState(false);
-  const [instagramDestination, setInstagramDestination] = useState(true);
-  const [youtubeDestination, setYoutubeDestination] = useState(true);
+  const [rightsConfirmed, setRightsConfirmed] = useState(true);
+  const instagramDestination = true;
   const [rightsBasis, setRightsBasis] = useState<"owned" | "licensed">("owned");
   const [contentContext, setContentContext] = useState("");
   const [madeForKids, setMadeForKids] = useState(false);
   const [containsSyntheticMedia, setContainsSyntheticMedia] = useState(false);
   const [paidProductPlacement, setPaidProductPlacement] = useState(false);
   const [reels, setReels] = useState<Reel[]>([]);
+  const [failedReels, setFailedReels] = useState<FailedReel[]>([]);
+  const [retryingId, setRetryingId] = useState<number | null>(null);
+  const [uploadingFailedId, setUploadingFailedId] = useState<number | null>(null);
   const [dashboard, setDashboard] = useState<Dashboard>(EMPTY_DASHBOARD);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [publishingId, setPublishingId] = useState<number | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [approvalDraft, setApprovalDraft] = useState<ApprovalDraft | null>(null);
   const [captionEnabled, setCaptionEnabled] = useState(true);
   const [caption, setCaption] = useState(EMPTY_DASHBOARD.settings.caption);
   const [coverMode, setCoverMode] = useState<Dashboard["settings"]["cover_mode"]>("fixed");
@@ -216,10 +244,15 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
   const [autoPublishEnabled, setAutoPublishEnabled] = useState(false);
   const [publishIntervalMinutes, setPublishIntervalMinutes] = useState(60);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [activatingDirect, setActivatingDirect] = useState(false);
+  const [directActivated, setDirectActivated] = useState(false);
+  const [shortcutSetup, setShortcutSetup] = useState<{ token: string; endpoint: string } | null>(null);
+  const [creatingShortcutAccess, setCreatingShortcutAccess] = useState(false);
   const [notice, setNotice] = useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
   const [activeView, setActiveView] = useState<"inbox" | "dashboard">(initialView);
   const [reelPage, setReelPage] = useState(1);
   const settingsInitialized = useRef(false);
+  const approvalLinkHandled = useRef(false);
   const reelPageCount = Math.max(1, Math.ceil(reels.length / REELS_PER_PAGE));
   const currentReelPage = Math.min(reelPage, reelPageCount);
   const visibleReels = useMemo(
@@ -235,9 +268,10 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
         fetch("/api/dashboard", { credentials: "same-origin", headers: { accept: "application/json" } }),
       ]);
       if (!reelsResponse.ok || !dashboardResponse.ok) throw new Error("Não foi possível carregar o painel.");
-      const reelsData = await reelsResponse.json() as { reels?: Reel[] };
+      const reelsData = await reelsResponse.json() as { reels?: Reel[]; failed_reels?: FailedReel[] };
       const dashboardData = await dashboardResponse.json() as Dashboard;
       setReels(reelsData.reels ?? []);
+      setFailedReels(reelsData.failed_reels ?? []);
       setDashboard(dashboardData);
       if (!settingsInitialized.current) {
         settingsInitialized.current = true;
@@ -266,13 +300,39 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
   }, [loadData]);
 
   useEffect(() => {
+    if (approvalLinkHandled.current || !reels.length) return;
+    const reelId = Number(new URLSearchParams(window.location.search).get("approve"));
+    if (!Number.isInteger(reelId) || reelId <= 0) return;
+    const reel = reels.find((candidate) => candidate.id === reelId && candidate.status === "ready");
+    if (!reel) return;
+    approvalLinkHandled.current = true;
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.delete("approve");
+    window.history.replaceState({}, "", `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+    const openDialog = window.setTimeout(() => {
+      setActiveView("inbox");
+      setReelPage(Math.max(1, Math.ceil((reels.indexOf(reel) + 1) / REELS_PER_PAGE)));
+      setApprovalDraft({
+        reel,
+        instagram: reel.publish_status !== "published" && reel.instagram_selected,
+        rightsBasis: reel.rights_basis || "licensed",
+        context: reel.content_context || "",
+        madeForKids: reel.made_for_kids,
+        containsSyntheticMedia: reel.contains_synthetic_media,
+        paidProductPlacement: reel.paid_product_placement,
+        rightsConfirmed: reel.intake_source === "instagram_direct" && reel.rights_confirmed,
+      });
+    }, 0);
+    return () => window.clearTimeout(openDialog);
+  }, [reels]);
+
+  useEffect(() => {
     const activeStatuses = new Set([
-      "queued", "downloading", "creating", "processing", "publishing", "preflight",
+      "awaiting_rights", "queued", "downloading", "creating", "processing", "publishing", "preflight",
       "analyzing", "uploading", "retrying", "awaiting_metadata",
     ]);
     const hasActiveWork = reels.some((reel) =>
-      activeStatuses.has(reel.status) || activeStatuses.has(reel.publish_status)
-      || activeStatuses.has(reel.youtube?.status || ""));
+      activeStatuses.has(reel.status) || activeStatuses.has(reel.publish_status));
     if (!hasActiveWork) return;
     const timer = window.setInterval(() => void loadData(true), 4500);
     return () => window.clearInterval(timer);
@@ -280,8 +340,8 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (publicationMode !== "download_only" && !instagramDestination && !youtubeDestination) {
-      setNotice({ tone: "error", text: "Selecione Instagram, YouTube ou ambos." });
+    if (publicationMode !== "download_only" && !instagramDestination) {
+      setNotice({ tone: "error", text: "Selecione o Instagram para publicar." });
       return;
     }
     setNotice(null);
@@ -300,10 +360,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
           rightsConfirmed,
           destinations: publicationMode === "download_only"
             ? []
-            : [
-              ...(instagramDestination ? ["instagram"] : []),
-              ...(youtubeDestination ? ["youtube"] : []),
-            ],
+            : ["instagram"],
           rightsBasis,
           context: contentContext,
           madeForKids,
@@ -328,7 +385,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
         setUrl("");
         setSourceAccount("");
         setContentContext("");
-        setRightsConfirmed(false);
+        setRightsConfirmed(true);
         setReelPage(1);
       } else if (data.reason === "duplicate") {
         setNotice({ tone: "info", text: `Esse Reel já está registrado como #${data.id}.` });
@@ -344,33 +401,173 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
     }
   }
 
-  async function publish(reel: Reel) {
+  function openApproval(reel: Reel) {
+    const instagramAlreadyPublished = reel.publish_status === "published";
+    setApprovalDraft({
+      reel,
+      instagram: instagramAlreadyPublished ? false : reel.instagram_selected,
+      rightsBasis: reel.rights_basis || "licensed",
+      context: reel.content_context || "",
+      madeForKids: reel.made_for_kids,
+      containsSyntheticMedia: reel.contains_synthetic_media,
+      paidProductPlacement: reel.paid_product_placement,
+      rightsConfirmed: reel.intake_source === "instagram_direct" && reel.rights_confirmed,
+    });
+  }
+
+  async function retryFailedReel(reel: FailedReel) {
+    setRetryingId(reel.id);
+    setNotice(null);
+    try {
+      const response = await fetch(`/api/reels/${reel.id}/retry`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+      const data = await response.json() as { accepted?: boolean; error?: string };
+      if (!response.ok || !data.accepted) {
+        throw new Error(data.error || "Não foi possível tentar o download novamente.");
+      }
+      setNotice({ tone: "success", text: `Nova tentativa iniciada para o Reel #${reel.id}.` });
+      await loadData(true);
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Não foi possível tentar novamente.",
+      });
+    } finally {
+      setRetryingId(null);
+    }
+  }
+
+  async function uploadFailedReel(reel: FailedReel, file: File) {
+    setUploadingFailedId(reel.id);
+    setNotice(null);
+    try {
+      const isMp4 = file.type === "video/mp4"
+        || ((!file.type || file.type === "application/octet-stream") && /\.mp4$/i.test(file.name));
+      if (!isMp4) throw new Error("Selecione um arquivo MP4.");
+      if (file.size > 90 * 1024 * 1024) throw new Error("O MP4 deve ter no máximo 90 MB.");
+      const response = await fetch(`/api/reels/${reel.id}/media`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "content-type": file.type || "video/mp4",
+          "x-upload-filename": file.name.replace(/[^\x20-\x7E]/g, "_").slice(0, 160) || "video.mp4",
+        },
+        body: file,
+      });
+      const data = await response.json() as { ready?: boolean; error?: string };
+      if (!response.ok || !data.ready) throw new Error(data.error || "Não foi possível enviar o MP4.");
+      setNotice({ tone: "success", text: `MP4 enviado. O Reel #${reel.id} está pronto para aprovação.` });
+      await loadData(true);
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Não foi possível enviar o MP4.",
+      });
+    } finally {
+      setUploadingFailedId(null);
+    }
+  }
+
+  async function activateDirect() {
+    setActivatingDirect(true);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/instagram/direct/subscribe", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+      const data = await response.json() as { subscribed?: boolean; error?: string };
+      if (!response.ok || !data.subscribed) {
+        throw new Error(data.error || "Não foi possível ativar os eventos do Direct.");
+      }
+      setDirectActivated(true);
+      setNotice({
+        tone: "info",
+        text: `Assinatura solicitada para ${dashboard.settings.direct_allowed_username}. A entrada pelo Direct ainda depende da liberação do aplicativo e do webhook pela Meta.`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Não foi possível ativar o Direct.",
+      });
+    } finally {
+      setActivatingDirect(false);
+    }
+  }
+
+  async function createShortcutAccess() {
+    setCreatingShortcutAccess(true);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/shortcut/access", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+      const data = await response.json() as { token?: string; endpoint?: string; error?: string };
+      if (!response.ok || !data.token || !data.endpoint) {
+        throw new Error(data.error || "Não foi possível criar o acesso do Atalho.");
+      }
+      setShortcutSetup({ token: data.token, endpoint: data.endpoint });
+      setNotice({
+        tone: "success",
+        text: "Acesso privado criado. Termine a configuração no app Atalhos do iPhone.",
+      });
+      await loadData(true);
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Não foi possível criar o acesso do Atalho.",
+      });
+    } finally {
+      setCreatingShortcutAccess(false);
+    }
+  }
+
+  async function publish(draft: ApprovalDraft) {
+    const reel = draft.reel;
+    if (!draft.instagram) {
+      setNotice({ tone: "error", text: "Selecione o Instagram para publicar." });
+      return;
+    }
+    if (!draft.rightsConfirmed) {
+      setNotice({ tone: "error", text: "Confirme os direitos antes de aprovar." });
+      return;
+    }
     setNotice(null);
     setPublishingId(reel.id);
     try {
       const response = await fetch(`/api/reels/${reel.id}/publish`, {
         method: "POST",
         credentials: "same-origin",
-        headers: { accept: "application/json" },
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({
+          rightsConfirmed: true,
+          destinations: ["instagram"],
+          rightsBasis: draft.rightsBasis,
+          context: draft.context,
+          madeForKids: draft.madeForKids,
+          containsSyntheticMedia: draft.containsSyntheticMedia,
+          paidProductPlacement: draft.paidProductPlacement,
+        }),
       });
       const data = await response.json() as {
         error?: string;
         queued?: boolean;
         scheduledFor?: string | null;
-        awaitingMetadata?: boolean;
-        youtube?: { requested?: boolean; status?: string };
       };
       if (!response.ok) throw new Error(data.error || "Não foi possível iniciar a publicação.");
       setNotice({
         tone: "success",
-        text: data.awaitingMetadata
-          ? `Reel #${reel.id} aprovado. A análise preventiva prepara Instagram e o upload privado no YouTube.`
-          : data.queued
+        text: data.queued
           ? `Reel #${reel.id} aprovado e programado para ${formatDate(data.scheduledFor || null)}.`
-          : data.youtube?.requested
-            ? `Publicação do Reel #${reel.id} iniciada; o Short será enviado como privado.`
-            : `Publicação do Reel #${reel.id} iniciada.`,
+          : `Publicação do Reel #${reel.id} iniciada no Instagram.`,
       });
+      setApprovalDraft(null);
       await loadData(true);
     } catch (error) {
       setNotice({
@@ -382,102 +579,44 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
     }
   }
 
-  async function retryYouTube(reel: Reel) {
+  async function deleteReel(reel: Reel) {
+    const published = reel.publish_status === "published" || Boolean(reel.instagram_permalink);
+    const confirmed = window.confirm(
+      published
+        ? `Excluir o MP4 do Reel #${reel.id}? A publicação e todas as métricas do Instagram serão preservadas.`
+        : `Excluir o MP4 do Reel #${reel.id}? Ele sairá da produção e o arquivo armazenado será removido.`,
+    );
+    if (!confirmed) return;
+    setDeletingId(reel.id);
     setNotice(null);
-    setPublishingId(reel.id);
     try {
-      const response = await fetch(`/api/reels/${reel.id}/youtube/retry`, {
-        method: "POST",
+      const response = await fetch(`/api/reels/${reel.id}`, {
+        method: "DELETE",
         credentials: "same-origin",
         headers: { accept: "application/json" },
       });
-      const data = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(data.error || "Não foi possível reenfileirar o Short.");
-      setNotice({ tone: "success", text: `Short do Reel #${reel.id} reenfileirado sem criar duplicata.` });
-      await loadData(true);
-    } catch (error) {
-      setNotice({
-        tone: "error",
-        text: error instanceof Error ? error.message : "Não foi possível reenfileirar o Short.",
-      });
-    } finally {
-      setPublishingId(null);
-    }
-  }
-
-  async function releaseYouTube(reel: Reel) {
-    const confirmed = window.confirm(
-      "Você abriu o YouTube Studio e confirmou que os checks de direitos autorais e adequação estão limpos?",
-    );
-    if (!confirmed) return;
-    setNotice(null);
-    setPublishingId(reel.id);
-    try {
-      const response = await fetch(`/api/reels/${reel.id}/youtube/release`, {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { accept: "application/json", "content-type": "application/json" },
-        body: JSON.stringify({ checksConfirmed: true }),
-      });
-      const data = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(data.error || "Não foi possível tornar o Short público.");
-      setNotice({ tone: "success", text: `Short do Reel #${reel.id} publicado após a confirmação dos checks.` });
-      await loadData(true);
-    } catch (error) {
-      setNotice({
-        tone: "error",
-        text: error instanceof Error ? error.message : "Não foi possível tornar o Short público.",
-      });
-    } finally {
-      setPublishingId(null);
-    }
-  }
-
-  async function reviewYouTube(reel: Reel) {
-    const title = window.prompt("Título do Short em inglês (até 100 caracteres):", reel.youtube?.title || "");
-    if (title == null) return;
-    const description = window.prompt(
-      "Descrição curta em inglês. Use somente fatos visíveis ou confirmados:",
-      reel.youtube?.description || "",
-    );
-    if (description == null) return;
-    const tagText = window.prompt(
-      "Até três hashtags, separadas por vírgula:",
-      reel.youtube?.tags.join(", ") || "Shorts",
-    );
-    if (tagText == null) return;
-    const confirmed = window.confirm(
-      "Confirmo que assisti ao vídeo completo, possuo os direitos e que título, descrição e hashtags descrevem somente o conteúdo real.",
-    );
-    if (!confirmed) return;
-    setNotice(null);
-    setPublishingId(reel.id);
-    try {
-      const response = await fetch(`/api/reels/${reel.id}/youtube/metadata`, {
-        method: "PATCH",
-        credentials: "same-origin",
-        headers: { accept: "application/json", "content-type": "application/json" },
-        body: JSON.stringify({
-          title,
-          description,
-          tags: tagText.split(",").map((tag) => tag.trim().replace(/^#/, "")).filter(Boolean).slice(0, 3),
-          manualReviewConfirmed: true,
-        }),
-      });
-      const data = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(data.error || "Não foi possível confirmar a revisão.");
+      const data = await response.json() as {
+        deleted?: boolean;
+        metrics_preserved?: boolean;
+        error?: string;
+      };
+      if (!response.ok || !data.deleted) {
+        throw new Error(data.error || "Não foi possível excluir o arquivo.");
+      }
       setNotice({
         tone: "success",
-        text: `Revisão do Short #${reel.id} confirmada. Ele continua privado até os checks do Studio.`,
+        text: data.metrics_preserved
+          ? `MP4 do Reel #${reel.id} excluído. A publicação e as métricas foram preservadas.`
+          : `Reel #${reel.id} e seu MP4 foram removidos da produção.`,
       });
       await loadData(true);
     } catch (error) {
       setNotice({
         tone: "error",
-        text: error instanceof Error ? error.message : "Não foi possível confirmar a revisão.",
+        text: error instanceof Error ? error.message : "Não foi possível excluir o arquivo.",
       });
     } finally {
-      setPublishingId(null);
+      setDeletingId(null);
     }
   }
 
@@ -595,30 +734,74 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
               <small>{dashboard.settings.meta_connected ? "API oficial da Meta" : "Publicação fica aguardando autorização"}</small>
             </div>
           </div>
-          <div className="connection-card">
-            <span className={`connection-dot ${dashboard.settings.youtube.connected ? "online" : ""}`} />
+          <div className="connection-card direct-connection-card">
+            <span className="connection-dot" />
             <div>
-              <strong>
-                {dashboard.settings.youtube.connected
-                  ? dashboard.settings.youtube.channel_title || "YouTube conectado"
-                  : "YouTube aguardando conexão"}
-              </strong>
+              <strong>Entrada pelo Direct (Meta)</strong>
               <small>
-                {dashboard.settings.youtube.connected
-                  ? "Uploads começam privados"
-                  : dashboard.settings.youtube.configured
-                    ? "Autorize o canal exato pelo Google"
-                    : "Configure as credenciais OAuth"}
+                {directActivated
+                  ? "Assinatura solicitada; aguardando liberação da Meta"
+                  : dashboard.settings.direct_configured
+                  ? `Restrita a ${dashboard.settings.direct_allowed_username}; depende da liberação da Meta`
+                  : "Aguardando configuração segura na Meta"}
               </small>
-              {!dashboard.settings.youtube.connected && dashboard.settings.youtube.configured ? (
-                <a href="/api/youtube/oauth/start">Conectar YouTube</a>
-              ) : null}
             </div>
+            {dashboard.settings.direct_configured && !directActivated ? (
+              <button type="button" onClick={() => void activateDirect()} disabled={activatingDirect}>
+                {activatingDirect ? "Ativando…" : "Ativar eventos"}
+              </button>
+            ) : null}
+          </div>
+          <div className="connection-card direct-connection-card">
+            <span className={`connection-dot ${dashboard.settings.shortcut_configured ? "online" : ""}`} />
+            <div>
+              <strong>Atalho do iPhone</strong>
+              <small>
+                {dashboard.settings.shortcut_configured
+                  ? "Acesso privado configurado; prepara o MP4 ao compartilhar"
+                  : "Alternativa recomendada enquanto a Meta não libera o Direct"}
+              </small>
+            </div>
+            <button type="button" onClick={() => void createShortcutAccess()} disabled={creatingShortcutAccess}>
+              {creatingShortcutAccess
+                ? "Gerando…"
+                : dashboard.settings.shortcut_configured
+                  ? "Gerar novo acesso"
+                  : "Configurar Atalho"}
+            </button>
           </div>
         </div>
       </section>
 
       {notice ? <div className={`global-notice ${notice.tone}`} role="status">{notice.text}</div> : null}
+
+      {shortcutSetup ? (
+        <section className="shortcut-setup" aria-labelledby="shortcut-setup-title">
+          <div className="section-heading">
+            <span>iOS</span>
+            <div>
+              <h2 id="shortcut-setup-title">Configurar compartilhamento direto</h2>
+              <p>O acesso abaixo aparece apenas agora. Guarde-o somente no app Atalhos.</p>
+            </div>
+          </div>
+          <ol>
+            <li>Crie um Atalho que aceite URLs pela Folha de Compartilhamento.</li>
+            <li>Adicione “Obter conteúdo de URL”, use o método POST e a URL abaixo.</li>
+            <li>Adicione o cabeçalho Authorization com o valor <code>Bearer SEU_TOKEN</code>.</li>
+            <li>No corpo JSON, envie <code>url</code> com a Entrada do Atalho.</li>
+          </ol>
+          <label>
+            URL do ReelVolt
+            <input type="text" readOnly value={shortcutSetup.endpoint} />
+          </label>
+          <label>
+            Token privado
+            <input type="text" readOnly value={shortcutSetup.token} />
+          </label>
+          <p className="shortcut-warning">Gerar outro acesso revoga imediatamente o anterior.</p>
+          <button className="ghost-button" type="button" onClick={() => setShortcutSetup(null)}>Concluí</button>
+        </section>
+      ) : null}
 
       <section className="studio-grid">
         <form className="intake-panel" onSubmit={submit}>
@@ -643,36 +826,20 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
           </label>
 
           <label>
-            Conta de origem <small>{youtubeDestination && rightsBasis === "owned" ? "obrigatória para YouTube próprio" : "opcional"}</small>
+            Conta de origem <small>opcional</small>
             <input
               type="text"
               placeholder="@criador"
               value={sourceAccount}
               onChange={(event) => setSourceAccount(event.target.value)}
               maxLength={80}
-              required={publicationMode !== "download_only" && youtubeDestination && rightsBasis === "owned"}
             />
           </label>
 
-          <fieldset className="destination-picker" disabled={publicationMode === "download_only"}>
-            <legend>Publicar em</legend>
-            <label>
-              <input
-                type="checkbox"
-                checked={instagramDestination}
-                onChange={(event) => setInstagramDestination(event.target.checked)}
-              />
-              <span><strong>Instagram Reels</strong><small>Legenda própria e capa configurada</small></span>
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={youtubeDestination}
-                onChange={(event) => setYoutubeDestination(event.target.checked)}
-              />
-              <span><strong>YouTube Shorts</strong><small>Upload privado; liberação manual após os checks</small></span>
-            </label>
-          </fieldset>
+          <div className="instagram-destination-note">
+            <strong>Publicação no Instagram Reels</strong>
+            <small>Legenda própria e capa configurada.</small>
+          </div>
 
           <label>
             Ação após o download
@@ -736,7 +903,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
               onChange={(event) => setRightsConfirmed(event.target.checked)}
               required
             />
-            <span>Confirmo que tenho autorização para baixar, editar e publicar este conteúdo.</span>
+            <span>Autorização permanente registrada para os links enviados por você.</span>
           </label>
 
           <button className="primary-button" type="submit" disabled={submitting}>
@@ -847,6 +1014,12 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
             Atualizar
           </button>
         </div>
+        <div className="publishing-guide" aria-label="Como acompanhar cada publicação">
+          <strong>Como acompanhar</strong>
+          <span><b>1.</b> Confira o vídeo e os direitos.</span>
+          <span><b>2.</b> Aprove a publicação no Instagram.</span>
+          <span><b>3.</b> Acompanhe o processamento até o Reel ficar publicado.</span>
+        </div>
 
         {loading ? (
           <div className="empty-state">Carregando o estúdio…</div>
@@ -856,10 +1029,12 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
           <>
           <div className="reel-list">
             {visibleReels.map((reel) => {
+              const instagramAlreadyPublished = reel.publish_status === "published";
               const canPublish = reel.status === "ready"
-                && ["not_requested", "awaiting_approval", "awaiting_setup", "failed", "processing", "publishing"].includes(reel.publish_status);
-              const canApproveAnyDestination = dashboard.settings.meta_connected
-                || Boolean(reel.youtube && dashboard.settings.youtube.configured);
+                && !instagramAlreadyPublished
+                && ["not_requested", "awaiting_approval", "awaiting_setup", "awaiting_metadata", "failed", "processing", "publishing"].includes(reel.publish_status);
+              const canApproveAnyDestination = dashboard.settings.meta_connected;
+              const instagramState = instagramProgress(reel);
               return (
                 <article className="reel-row" key={reel.id}>
                   {reel.cover_mode === "fixed" ? (
@@ -870,51 +1045,48 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                   <div className="reel-main">
                     <div className="reel-topline">
                       <strong>#{reel.id} · {reel.source_account || "Origem não informada"}</strong>
-                      <span>{formatDate(reel.created_at)}</span>
+                      {reel.intake_source === "instagram_direct" ? <small>Recebido pelo Direct</small> : null}
+                      <span>Recebido {formatDate(reel.created_at)}</span>
+                    </div>
+                    <div className="reel-timeline" aria-label={`Datas do Reel ${reel.id}`}>
+                      <span>MP4 pronto <strong>{formatDate(reel.completed_at)}</strong></span>
+                      {reel.published_at ? (
+                        <span>Instagram <strong>{formatDate(reel.published_at)}</strong></span>
+                      ) : null}
                     </div>
                     <a className="source-link" href={reel.source_url} target="_blank" rel="noreferrer">
                       {reel.source_url}
                     </a>
                     <div className="status-line">
                       <span className={`status-badge ${reel.status}`}>{DOWNLOAD_LABELS[reel.status] ?? reel.status}</span>
-                      <span className={`publish-badge ${reel.publish_status}`}>{PUBLISH_LABELS[reel.publish_status] ?? reel.publish_status}</span>
                       <span className="mode-badge">{publicationModeLabel(reel.publication_mode)}</span>
+                    </div>
+                    <div className="platform-progress-grid" aria-label={`Situação de publicação do Reel ${reel.id}`}>
+                      {reel.instagram_selected ? (
+                        <div className={`platform-progress instagram ${instagramState.tone}`}>
+                          <span>Instagram</span>
+                          <strong>{instagramState.title}</strong>
+                          <small>{instagramState.detail}</small>
+                        </div>
+                      ) : null}
                     </div>
                     {reel.scheduled_for ? (
                       <p className="schedule-line">Programado para {formatDate(reel.scheduled_for)}</p>
                     ) : null}
                     {reel.error ? <p className="reel-error">{reel.error}</p> : null}
                     {reel.publish_error ? <p className="reel-error">{reel.publish_error}</p> : null}
-                    {reel.youtube ? (
-                      <div className="youtube-status">
-                        <div>
-                          <span className={`publish-badge youtube-${reel.youtube.status}`}>
-                            YouTube · {YOUTUBE_LABELS[reel.youtube.status] ?? reel.youtube.status}
-                          </span>
-                          {reel.youtube.privacy_status ? <small>{reel.youtube.privacy_status}</small> : null}
-                        </div>
-                        {reel.youtube.title ? <strong>{reel.youtube.title}</strong> : null}
-                        {reel.youtube.description ? <p>{reel.youtube.description}</p> : null}
-                        {reel.youtube.tags.length ? <small>{reel.youtube.tags.map((tag) => `#${tag.replace(/^#/, "")}`).join(" ")}</small> : null}
-                        {reel.youtube.warning_long_claim ? (
-                          <p className="reel-warning">
-                            Short acima de 60s: um claim ativo pode bloquear o vídeo globalmente.
-                          </p>
-                        ) : null}
-                        {reel.youtube.error ? <p className="reel-error">{reel.youtube.error}</p> : null}
-                      </div>
-                    ) : null}
                   </div>
                   <div className="reel-actions">
                     {reel.instagram_permalink ? (
                       <a className="action-primary" href={reel.instagram_permalink} target="_blank" rel="noreferrer">
                         Ver no Instagram
                       </a>
-                    ) : canPublish ? (
+                    ) : null}
+                    {canPublish ? (
                       <button
                         className="action-primary"
                         type="button"
-                        onClick={() => void publish(reel)}
+                        onClick={() => openApproval(reel)}
                         disabled={!canApproveAnyDestination || publishingId === reel.id}
                         title={!canApproveAnyDestination ? "Conecte ao menos uma plataforma primeiro" : undefined}
                       >
@@ -922,46 +1094,13 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                           ? "Iniciando…"
                           : reel.publish_status === "publishing"
                             ? "Atualizar publicação"
+                          : reel.publish_status === "awaiting_metadata"
+                            ? "Continuar publicação"
                           : reel.publish_status === "processing"
                             ? "Continuar publicação"
                             : dashboard.settings.auto_publish_enabled
                               ? "Aprovar para a fila"
-                              : "Aprovar e publicar"}
-                      </button>
-                    ) : null}
-                    {reel.youtube?.studio_url ? (
-                      <a className="action-secondary" href={reel.youtube.studio_url} target="_blank" rel="noreferrer">
-                        Abrir checks no Studio
-                      </a>
-                    ) : null}
-                    {reel.youtube?.status === "awaiting_studio_check" ? (
-                      <button
-                        className="action-secondary"
-                        type="button"
-                        onClick={() => void reviewYouTube(reel)}
-                        disabled={publishingId === reel.id}
-                      >
-                        Revisar conteúdo e metadados
-                      </button>
-                    ) : null}
-                    {reel.youtube?.status === "awaiting_studio_check" ? (
-                      <button
-                        className="action-primary youtube-release"
-                        type="button"
-                        onClick={() => void releaseYouTube(reel)}
-                        disabled={publishingId === reel.id}
-                      >
-                        Checks conferidos — publicar
-                      </button>
-                    ) : null}
-                    {reel.youtube && ["failed", "retrying"].includes(reel.youtube.status) && !reel.youtube.video_id ? (
-                      <button
-                        className="action-secondary"
-                        type="button"
-                        onClick={() => void retryYouTube(reel)}
-                        disabled={publishingId === reel.id}
-                      >
-                        Tentar YouTube novamente
+                              : "Escolher destinos e aprovar"}
                       </button>
                     ) : null}
                     {reel.download_url ? (
@@ -971,6 +1110,16 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                     ) : (
                       <span className="processing-label">{reel.status === "failed" ? "Verifique o erro" : "Processando arquivo"}</span>
                     )}
+                    {reel.download_url ? (
+                      <button
+                        className="action-danger"
+                        type="button"
+                        onClick={() => void deleteReel(reel)}
+                        disabled={deletingId === reel.id || ["queued", "creating", "processing", "publishing"].includes(reel.publish_status)}
+                      >
+                        {deletingId === reel.id ? "Excluindo…" : "Excluir arquivo"}
+                      </button>
+                    ) : null}
                   </div>
                 </article>
               );
@@ -1002,6 +1151,179 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
           </>
         )}
       </section>
+
+      {failedReels.length ? (
+        <section className="failed-reels-panel" aria-labelledby="failed-reels-title">
+          <div>
+            <strong id="failed-reels-title">Falhas recentes de preparação</strong>
+            <small>Ficam fora da produção principal, mas podem ser recuperadas.</small>
+          </div>
+          <div className="failed-reels-list">
+            {failedReels.map((reel) => (
+              <article key={reel.id}>
+                <div>
+                  <strong>#{reel.id} · {reel.source_account || "Origem não informada"}</strong>
+                  <a href={reel.source_url} target="_blank" rel="noreferrer">{reel.source_url}</a>
+                  <small>{reel.error || "O download não foi concluído."}</small>
+                </div>
+                <div className="failed-reel-actions">
+                  <button
+                    type="button"
+                    onClick={() => void retryFailedReel(reel)}
+                    disabled={retryingId === reel.id || uploadingFailedId === reel.id}
+                  >
+                    {retryingId === reel.id ? "Tentando…" : "Tentar novamente"}
+                  </button>
+                  <label className="failed-upload-button" aria-disabled={uploadingFailedId === reel.id}>
+                    {uploadingFailedId === reel.id ? "Enviando…" : "Enviar MP4"}
+                    <input
+                      type="file"
+                      accept="video/mp4,.mp4"
+                      disabled={retryingId === reel.id || uploadingFailedId === reel.id}
+                      onChange={(event) => {
+                        const file = event.currentTarget.files?.[0];
+                        event.currentTarget.value = "";
+                        if (file) void uploadFailedReel(reel, file);
+                      }}
+                    />
+                  </label>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {approvalDraft ? (
+        <div className="approval-overlay" role="presentation">
+          <form
+            className="approval-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="approval-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void publish(approvalDraft);
+            }}
+          >
+            <div className="approval-dialog-heading">
+              <div>
+                <span>APROVAÇÃO DO INSTAGRAM</span>
+                <h2 id="approval-title">Reel #{approvalDraft.reel.id}</h2>
+                <p>Confira os dados e autorize a publicação deste MP4 no Instagram.</p>
+              </div>
+              <button type="button" onClick={() => setApprovalDraft(null)} aria-label="Fechar">
+                ×
+              </button>
+            </div>
+
+            <fieldset className="destination-picker">
+              <legend>Destino</legend>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={approvalDraft.instagram}
+                  disabled={approvalDraft.reel.publish_status === "published"}
+                  onChange={(event) => setApprovalDraft((current) =>
+                    current ? { ...current, instagram: event.target.checked } : current)}
+                />
+                <span>
+                  <strong>Instagram Reels</strong>
+                  <small>
+                    {approvalDraft.reel.publish_status === "published"
+                      ? "Já publicado; não será enviado novamente"
+                      : "Usa legenda e capa configuradas"}
+                  </small>
+                </span>
+              </label>
+            </fieldset>
+
+            <label>
+              Base dos direitos
+              <select
+                value={approvalDraft.rightsBasis}
+                onChange={(event) => setApprovalDraft((current) => current
+                  ? { ...current, rightsBasis: event.target.value as "owned" | "licensed" }
+                  : current)}
+              >
+                <option value="owned">Conteúdo próprio</option>
+                <option value="licensed">Conteúdo licenciado/autorizado</option>
+              </select>
+            </label>
+
+            <label>
+              Contexto para revisão <small>opcional</small>
+              <textarea
+                rows={3}
+                maxLength={800}
+                value={approvalDraft.context}
+                onChange={(event) => setApprovalDraft((current) =>
+                  current ? { ...current, context: event.target.value } : current)}
+                placeholder="Quem aparece, evento e fatos confirmados."
+              />
+            </label>
+
+            <div className="content-flags">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={approvalDraft.madeForKids}
+                  onChange={(event) => setApprovalDraft((current) =>
+                    current ? { ...current, madeForKids: event.target.checked } : current)}
+                />
+                Conteúdo infantil
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={approvalDraft.containsSyntheticMedia}
+                  onChange={(event) => setApprovalDraft((current) =>
+                    current ? { ...current, containsSyntheticMedia: event.target.checked } : current)}
+                />
+                Mídia sintética realista
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={approvalDraft.paidProductPlacement}
+                  onChange={(event) => setApprovalDraft((current) =>
+                    current ? { ...current, paidProductPlacement: event.target.checked } : current)}
+                />
+                Promoção paga
+              </label>
+            </div>
+
+            {approvalDraft.reel.intake_source === "instagram_direct" && approvalDraft.reel.rights_confirmed ? (
+              <div className="rights-check direct-rights-confirmed">
+                <span>
+                  Direitos confirmados no Direct por {dashboard.settings.direct_allowed_username}. O botão abaixo é
+                  a autorização final para publicar este Reel no Instagram.
+                </span>
+              </div>
+            ) : (
+              <label className="rights-check">
+                <input
+                  type="checkbox"
+                  checked={approvalDraft.rightsConfirmed}
+                  onChange={(event) => setApprovalDraft((current) =>
+                    current ? { ...current, rightsConfirmed: event.target.checked } : current)}
+                  required
+                />
+                <span>Confirmo os direitos e aprovo a publicação do Reel #{approvalDraft.reel.id} no Instagram.</span>
+              </label>
+            )}
+
+            <div className="approval-actions">
+              <button type="button" className="action-secondary" onClick={() => setApprovalDraft(null)}>
+                Cancelar
+              </button>
+              <button type="submit" className="action-primary" disabled={publishingId === approvalDraft.reel.id}>
+                {publishingId === approvalDraft.reel.id ? "Aprovando…" : "Autorizar publicação"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
         </>
       )}
     </main>

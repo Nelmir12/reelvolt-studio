@@ -1,38 +1,33 @@
 # BT Supply ReelVolt Studio
 
-Painel privado e instalável para receber links de Reels autorizados, baixar um
-único MP4 e distribuí-lo no Instagram Reels e no YouTube Shorts pelas APIs
-oficiais. D1 armazena estados, credenciais criptografadas e métricas; R2 armazena
-os vídeos. O Notion não faz parte do fluxo operacional.
+Painel privado e instalável para receber links de Reels autorizados, baixar o
+MP4, aprovar publicações e acompanhar os Insights oficiais do Instagram da
+conta `@btsupply_`. D1 armazena estados, preferências e métricas; R2 armazena os
+vídeos e as capas.
 
 ## Fluxo
 
-1. No iPhone, o usuário copia o link de um Reel e abre o Reel Inbox pela Tela de
-   Início. Em plataformas compatíveis, o PWA também aceita compartilhamento.
-2. O site exige autenticação com ChatGPT e permite somente e-mails autorizados.
-3. O usuário confirma os direitos e escolhe uma ação:
-   - **Preparar e aguardar aprovação** (padrão);
-   - **Somente baixar o MP4**.
-4. O serviço identifica links repetidos e usa a instância privada do Cobalt
-   como fallback quando o Instagram exige login.
-5. O MP4 inalterado é armazenado uma vez no R2. O usuário escolhe Instagram,
-   YouTube ou ambos; clientes antigos sem `destinations` permanecem
-   Instagram-only.
-6. Após a aprovação, um GitHub Action acionado sob demanda valida formato com
-   FFprobe e envia o MP4 inalterado. Não existe polling ocioso nem serviço Render.
-   Sem uma chave paga de IA, o Short recebe metadados provisórios neutros e exige
-   revisão humana explícita no painel.
-7. A fila automática é opcional. Todo Reel precisa ser aprovado previamente e
-   recebe um horário conforme o intervalo configurado; alterar os padrões não
-   muda itens já aprovados.
-8. O Instagram segue `media_publish` pela Meta. O YouTube usa upload retomável
-   e sempre cria o vídeo como privado.
-9. Depois do processamento, o painel exige a revisão do vídeo e dos metadados e
-   abre o vídeo exato no YouTube Studio. O Short somente fica público após essas
-   duas confirmações e o backend revalidar os gates e a auditoria do projeto da
-   API.
-10. O Dashboard mantém métricas e rankings separados por plataforma, com
-    snapshots diários e nos marcos de 1h, 24h, 72h e 7 dias.
+1. O usuário compartilha um Reel pelo PWA, pelo Atalho privado do iPhone ou
+   envia o Reel de `@nelmirjr` para o Direct de `@btsupply_`.
+2. O site valida o usuário, a URL e a origem autenticada. A autorização
+   permanente concedida pelo proprietário se aplica somente a esses canais
+   privados; no Direct, a assinatura da Meta e o ID vinculado a `@nelmirjr`
+   continuam obrigatórios.
+3. O MP4 é obtido diretamente, pelo embed público compatível ou por um
+   resolvedor privado/licenciado. Se o IP do provedor principal for bloqueado,
+   o ReelVolt aciona um executor isolado no GitHub Actions e recebe o MP4 pelo
+   mesmo registro. Se todos os caminhos automáticos forem recusados pelo
+   Instagram, o item ainda aceita o envio manual de um MP4 e fica armazenado
+   uma única vez no R2.
+4. O usuário pode somente baixar o arquivo ou prepará-lo para aprovação. No
+   fluxo do Direct, recebe um botão que abre exatamente o Reel preparado.
+5. Após a aprovação explícita, o Reel é publicado pela API oficial da Meta,
+   imediatamente ou pela fila configurada.
+6. Os Insights oficiais alimentam o dashboard e o histórico de métricas.
+
+O experimento de publicação no YouTube foi retirado. As tabelas e os registros
+históricos permanecem preservados no D1, mas nenhuma nova opção, rota ou
+execução do YouTube fica disponível.
 
 Use somente vídeos próprios, licenciados ou autorizados pelo titular.
 
@@ -40,64 +35,67 @@ Use somente vídeos próprios, licenciados ou autorizados pelo titular.
 
 As variáveis estão documentadas em `.env.example`:
 
-- `ADMIN_TOKEN`: protege diagnósticos e testes administrativos.
+- `ADMIN_TOKEN`: protege diagnósticos administrativos.
 - `PUBLIC_BASE_URL`: endereço público do serviço.
-- `INBOX_ALLOWED_EMAILS`: e-mails do ChatGPT autorizados, separados por vírgula.
+- `INBOX_ALLOWED_EMAILS`: e-mails autorizados, separados por vírgula.
 - `REEL_RESOLVER_URL`, `REEL_RESOLVER_TOKEN` e
-  `REEL_RESOLVER_AUTH_SCHEME`: fallback privado quando o Instagram exige login,
-  compatível com uma instância privada do Cobalt.
-- `INSTAGRAM_GRAPH_HOST`: `graph.instagram.com` para Instagram Login ou
-  `graph.facebook.com` para Facebook Login.
+  `REEL_RESOLVER_AUTH_SCHEME`: fallback privado/licenciado.
+- `GITHUB_ACTIONS_TOKEN`, `GITHUB_REPOSITORY`,
+  `REEL_DOWNLOAD_WORKFLOW_ID` e `REEL_DOWNLOAD_WORKFLOW_REF`: executor
+  alternativo para bloqueios de IP do resolvedor principal.
+- `REEL_DOWNLOAD_WORKER_SECRET`: autentica o retorno do MP4; durante a
+  migração, o segredo histórico `YOUTUBE_WORKER_SECRET` é aceito somente como
+  credencial interna compatível, sem reativar nenhuma função do YouTube.
+- `INSTAGRAM_GRAPH_HOST`: host oficial da Graph API.
 - `INSTAGRAM_API_VERSION`: versão ativa configurada no aplicativo da Meta.
 - `INSTAGRAM_USER_ID`: ID profissional da conta que receberá os Reels.
-- `INSTAGRAM_ACCESS_TOKEN`: token com permissão de publicação.
-- `PUBLISH_URL_SECRET`: segredo aleatório usado para assinar links de mídia com
-  validade de duas horas.
-- `YOUTUBE_CLIENT_ID` e `YOUTUBE_CLIENT_SECRET`: credenciais OAuth do tipo
-  aplicação Web.
-- `YOUTUBE_TOKEN_SECRET`: chave exclusiva usada para criptografar o refresh
-  token no D1.
-- `YOUTUBE_WORKER_SECRET`: autentica o claim e os callbacks do executor.
-- `YOUTUBE_EXECUTOR_MODE=github`, `GITHUB_REPOSITORY`, `GITHUB_WORKFLOW_ID` e
-  `GITHUB_WORKFLOW_REF`: selecionam o executor gratuito sob demanda.
-- `GITHUB_ACTIONS_TOKEN`: token restrito a Actions neste único repositório.
-- `YOUTUBE_API_AUDITED`: somente `true` após a auditoria externa do projeto;
-  enquanto for `false`, a liberação pública é bloqueada.
-- `OWNED_SOURCE_ACCOUNTS`: lista de contas próprias autorizadas.
-- `OPENAI_API_KEY` e `OPENAI_*_MODEL`: integração opcional e paga. Sem a chave,
-  o produto mantém o Short privado até a revisão humana.
+- `INSTAGRAM_ACCESS_TOKEN`: token com permissão de publicação e Insights.
+- `INSTAGRAM_DIRECT_ALLOWED_USERNAME`: único usuário autorizado a enviar pelo
+  Direct (atualmente `nelmirjr`).
+- `META_APP_SECRET`: segredo usado para validar `X-Hub-Signature-256`.
+- `META_VERIFY_TOKEN`: segredo usado pela Meta ao validar o callback.
+- `PUBLISH_URL_SECRET`: assina URLs temporárias consumidas pela Meta.
 
 Com Instagram Login, o token precisa das permissões
-`instagram_business_basic`, `instagram_business_content_publish` e
-`instagram_business_manage_insights`.
+`instagram_business_basic`, `instagram_business_content_publish`,
+`instagram_business_manage_insights` e `instagram_business_manage_messages`.
 
 ## Rotas principais
 
 - `GET /`: painel autenticado.
-- `POST /api/reels/intake`: recebe um Reel e as opções de fluxo.
-- `GET /api/reels`: lista os registros recentes.
-- `GET /api/dashboard`: retorna métricas e estado das integrações.
+- `GET|POST /webhooks/instagram`: validação e eventos assinados do Direct.
+- `POST /api/instagram/direct/subscribe`: ativa `messages` e
+  `messaging_postbacks` para a conta profissional.
+- `POST /api/reels/intake`: recebe um Reel e as opções do fluxo.
+- `POST /api/reels/:id/retry`: recupera um download que falhou, sem duplicar o
+  registro nem alterar publicações e métricas existentes.
+- `POST /api/reels/:id/media`: recebe um MP4 de até 90 MB para recuperar um
+  item cujo download automático falhou, preservando o mesmo registro.
+- `POST /api/internal/reels/:id/resolver-result`: callback autenticado do
+  executor alternativo; recebe o MP4 ou uma falha recuperável.
+- `POST|DELETE /api/shortcut/access`: gera ou revoga o acesso privado do Atalho.
+- `POST /api/shortcut/intake`: recebe a URL do iPhone com um token Bearer cujo
+  valor é mostrado uma única vez e armazenado somente como hash no D1.
+- `GET /api/reels`: lista todos os registros ativos, sem corte fixo por quantidade.
+- `DELETE /api/reels/:id`: remove o MP4 do R2 e arquiva o item; quando o Reel já
+  foi publicado, preserva a publicação e todo o histórico de Insights.
+- `GET /api/dashboard`: retorna métricas e estado do Instagram.
 - `PUT /api/studio-settings`: salva legenda, capa e intervalo da fila.
-- `POST /api/studio-settings/cover`: envia uma nova capa fixa ao R2.
-- `GET /api/analytics`: retorna visualizações, alcance, interações, histórico e
-  recomendações.
-- `POST /api/analytics/refresh`: solicita uma nova leitura de Insights na Meta.
-- `POST /api/reels/:id/publish`: aprova para a fila, retoma ou repete uma publicação.
-- `GET /api/youtube/oauth/start` e `GET /api/youtube/oauth/callback`: conectam e
-  fixam o canal exato com state e PKCE.
-- `PATCH /api/reels/:id/youtube/metadata`: edita e remodera metadados.
-- `POST /api/reels/:id/youtube/retry`: retoma sem duplicar vídeo.
-- `POST /api/reels/:id/youtube/release`: confirma os checks e solicita a
-  mudança de privado para público.
-- `/api/internal/youtube/jobs/*`: lease, heartbeat, análise e conclusão,
-  protegidos por `YOUTUBE_WORKER_SECRET`.
-- `GET /worker-media/:id.mp4`: URL assinada e limitada ao lease, com suporte a
-  `Range`.
-- `POST /api/publication-queue/process`: processa manualmente um item vencido.
+- `POST /api/studio-settings/cover`: envia uma capa fixa ao R2.
+- `GET /api/analytics`: retorna métricas e recomendações do Instagram.
+- `POST /api/analytics/refresh`: solicita uma leitura exclusiva dos Insights;
+  sincronizações sobrepostas são bloqueadas e os Reels são processados com
+  concorrência limitada para permanecer dentro do tempo do worker.
+- `POST /api/reels/:id/publish`: aprova, retoma ou repete uma publicação.
+- `POST /api/publication-queue/process`: processa um item vencido.
 - `GET /download/:token`: entrega o MP4 ao usuário.
-- `GET /publish-media/:id.mp4`: link temporário assinado consumido pela Meta.
-- `GET /publish-cover/:id.jpg`: capa temporária assinada consumida pela Meta.
+- `GET /publish-media/:id.mp4`: URL temporária do MP4 para a Meta.
+- `GET /publish-cover/:id.jpg`: URL temporária da capa para a Meta.
 - `GET /api/integrations/status`: diagnóstico administrativo.
+
+As antigas rotas `/api/youtube/*`, `/api/internal/youtube/*`,
+`/api/reels/:id/youtube/*` e `/worker-media/*` respondem como recurso retirado e
+não executam publicação.
 
 ## Desenvolvimento local
 
@@ -107,26 +105,42 @@ npm install
 npm run dev
 ```
 
-O executor está em `youtube-uploader/` e o workflow em
-`.github/workflows/youtube-uploader.yml`. O Sites aciona uma execução somente
-quando existe um Short na fila; o refresh token do Google nunca sai do D1.
-Antes de ativar, confirme no GitHub que não existe forma de pagamento ou que o
-orçamento de Actions interrompe o uso ao atingir zero.
+Antes de enviar mudanças:
 
-Para continuar o projeto em outra máquina usando o Codex, consulte
+```powershell
+npm run lint
+npm test
+git diff --check
+```
+
+Para continuar o projeto em outra máquina, consulte
 [`CONTINUAR-NO-CODEX.md`](CONTINUAR-NO-CODEX.md).
 
-## Observações
+## Segurança
 
-O canal de entrada não altera as restrições técnicas do Instagram. O serviço
-tenta primeiro o vídeo exposto publicamente e usa um resolvedor próprio ou
-licenciado como fallback. Sites que proíbem bots, scripts ou acesso automatizado
-não devem ser usados como resolvedores.
+- Nunca envie senhas, códigos de verificação ou tokens pelo chat.
+- Não adicione `.env` ao Git.
+- Não altere o `project_id` em `.openai/hosting.json`.
+- Não remova tabelas do D1 nem objetos do R2 como efeito colateral.
+- Nunca publique um Reel sem aprovação explícita para aquele item.
+- Falhas de download ficam fora da produção principal, mas aparecem em uma
+  área compacta com o erro e uma nova tentativa segura.
+- Nunca aceite um evento do Direct sem assinatura HMAC válida; o primeiro
+  evento autorizado confere o username e fixa o Instagram-scoped ID de
+  `@nelmirjr` no D1.
 
-A publicação segue o processo oficial da Meta: o vídeo precisa ficar disponível
-temporariamente por URL pública, o contêiner deve terminar com status
-`FINISHED` e só então o Reel é publicado.
+## Entrada pelo Direct e alternativa gratuita
 
-No YouTube não existe promessa de risco zero: Content ID, políticas de conteúdo
-reutilizado e monetização são decisões do YouTube. A API pública não é usada
-como detector de claims ou de adequação a anúncios.
+O webhook aceita os tipos de compartilhamento que a Meta pode enviar para um
+post ou Reel (`share`, `media`, `video`, `ig_reel` e `reel`). Para `@nelmirjr`,
+a autorização permanente já registrada prepara o MP4 sem outra resposta e o
+Direct devolve o botão de aprovação no ReelVolt.
+
+Para uso restrito às próprias contas, mantenha `@nelmirjr` e `@btsupply_` como
+contas de teste/funções do aplicativo e conceda
+`instagram_business_manage_messages`; isso evita depender de acesso avançado
+destinado a usuários externos. Enquanto o aplicativo não estiver publicado e o
+callback não estiver liberado pela Meta, o Direct não entrega eventos reais. A
+alternativa gratuita é o Atalho privado do iPhone: ele envia a URL diretamente
+ao ReelVolt e prepara o MP4. Em todos os canais, cada publicação ainda exige a
+aprovação final daquele Reel no painel.

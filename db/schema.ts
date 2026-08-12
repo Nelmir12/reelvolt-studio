@@ -33,11 +33,14 @@ export const reels = sqliteTable("reels", {
   instagramPermalink: text("instagram_permalink"),
   publishRequestedAt: text("publish_requested_at"),
   publishedAt: text("published_at"),
+  archivedAt: text("archived_at"),
+  mediaDeletedAt: text("media_deleted_at"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   completedAt: text("completed_at"),
 }, (table) => [
   index("reels_publish_status_idx").on(table.publishStatus),
   index("reels_schedule_idx").on(table.publishStatus, table.scheduledFor),
+  index("reels_active_id_idx").on(table.archivedAt, table.id),
 ]);
 
 export const studioSettings = sqliteTable("studio_settings", {
@@ -104,6 +107,25 @@ export const reelInsightSnapshots = sqliteTable("reel_insight_snapshots", {
   uniqueIndex("reel_insight_snapshots_milestone_idx").on(table.reelId, table.milestone),
   index("reel_insight_snapshots_reel_idx").on(table.reelId, table.capturedAt),
 ]);
+
+export const instagramInsightSync = sqliteTable("instagram_insight_sync", {
+  id: integer("id").primaryKey(),
+  status: text("status").notNull().default("idle"),
+  startedAt: text("started_at"),
+  completedAt: text("completed_at"),
+  lastError: text("last_error"),
+  totalTargets: integer("total_targets").notNull().default(0),
+  updatedTargets: integer("updated_targets").notNull().default(0),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const shortcutAccess = sqliteTable("shortcut_access", {
+  id: integer("id").primaryKey(),
+  tokenHash: text("token_hash").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  lastUsedAt: text("last_used_at"),
+  revokedAt: text("revoked_at"),
+});
 
 export const youtubeAuth = sqliteTable("youtube_auth", {
   id: integer("id").primaryKey(),

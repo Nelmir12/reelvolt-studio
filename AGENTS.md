@@ -18,32 +18,44 @@ ou alterar o projeto.
 ## Objetivo e arquitetura oficial
 
 O ReelVolt Studio é uma PWA privada para receber links de Reels autorizados,
-baixar os vídeos em MP4, gerenciar aprovação e distribuição multicanal e
-consultar Insights da conta `@btsupply_` e do canal YouTube conectado.
+baixar os vídeos em MP4, gerenciar aprovação e publicação no Instagram e
+consultar Insights da conta `@btsupply_`.
 
 O fluxo operacional atual é:
 
-1. O usuário envia um link pelo ReelVolt no iPhone, pelo PWA ou pelo mecanismo
-   de compartilhamento compatível.
-2. O serviço valida o usuário, a URL e a confirmação dos direitos de uso.
+1. O usuário envia um link pelo ReelVolt no iPhone/PWA, pelo Atalho privado do
+   iPhone ou compartilha um Reel de `@nelmirjr` para o Direct de `@btsupply_`.
+2. O serviço valida o usuário, a URL e a origem autenticada. No Direct, valida
+   também a assinatura do webhook e aceita somente o Instagram-scoped ID
+   vinculado ao username `@nelmirjr`.
 3. O vídeo é obtido diretamente quando possível; uma instância privada ou
-   licenciada do Cobalt pode ser usada como fallback.
+   licenciada do Cobalt pode ser usada como fallback. Se o IP do provedor
+   principal for recusado, um workflow autenticado e isolado do GitHub Actions
+   pode executar a mesma resolução e devolver o MP4 ao registro original.
+   Quando o Instagram não fornecer o MP4 por nenhum caminho automático, o
+   mesmo registro aceita um upload manual sem alterar métricas ou aprovações.
 4. O MP4 é armazenado no R2, enquanto estados, preferências, identificadores e
    métricas ficam no D1.
-5. Reels destinados à publicação aguardam aprovação humana.
-6. Após a aprovação, Instagram e YouTube mantêm estados independentes. O
-   Instagram usa exclusivamente a API oficial da Meta.
-7. Um GitHub Action autenticado e acionado somente quando há trabalho valida o
-   mesmo MP4 e realiza upload retomável no YouTube sempre como privado.
-8. Sem análise paga, conteúdo e metadados exigem revisão humana explícita. O
-   Short somente pode ficar público após processamento, gates internos,
-   auditoria da API e confirmação separada dos checks no YouTube Studio.
-9. Insights oficiais de cada plataforma alimentam dashboards separados; alcance
-   do Instagram nunca é somado às views do YouTube.
+5. Reels destinados à publicação aguardam aprovação humana. No fluxo do Direct,
+   a confirmação de direitos prepara o MP4 e um botão abre o item exato no
+   ReelVolt; somente o botão final do painel autoriza a publicação daquele Reel.
+6. Após a aprovação, o Instagram usa exclusivamente a API oficial da Meta.
+7. Insights oficiais do Instagram alimentam o dashboard e o histórico.
 
-Notion, Telegram e Direct do Instagram não fazem parte do fluxo operacional
-atual. Referências remanescentes a essas integrações devem ser tratadas como
-legado, salvo se o usuário solicitar expressamente sua reativação.
+O experimento de publicação no YouTube foi retirado. Preserve suas tabelas,
+credenciais e registros históricos, mas não exponha opções, rotas operacionais,
+executores ou métricas do YouTube sem uma nova solicitação explícita do usuário.
+
+Notion e Telegram não fazem parte do fluxo operacional atual. O Direct do
+Instagram foi reativado exclusivamente como entrada autenticada para
+`@nelmirjr`; ele não substitui a aprovação individual no ReelVolt.
+
+Em 10 de agosto de 2026, o usuário concedeu autorização permanente para
+baixar, editar e preparar todo conteúdo enviado por ele pelos canais privados
+autenticados do ReelVolt. Essa autorização elimina confirmações repetidas de
+direitos, mas não elimina a aprovação final individual de publicação. O
+Direct ainda depende da publicação do aplicativo e da liberação do webhook
+pela Meta; até isso ocorrer, use o Atalho privado do iPhone.
 
 ## Fontes de verdade
 
@@ -64,16 +76,27 @@ O arquivo `.openai/hosting.json` identifica o projeto Sites existente. Reutilize
 sempre esse projeto e os bindings `DB` e `VIDEOS`; não crie outro site, outro D1
 ou outro bucket R2 por conveniência.
 
+### Convenção de versões
+
+- Comunique versões do produto no padrão `1.N`, em que `N` é o número sequencial
+  atribuído pelo Sites: a versão interna `15` corresponde a **ReelVolt 1.15** e
+  a versão interna `16` corresponde a **ReelVolt 1.16**.
+- Preserve os números e identificadores internos do Sites, pois eles não são
+  rótulos editáveis e são necessários para implantação e rollback.
+- Em autorizações, relatórios e documentação, informe o nome público e, quando
+  houver risco de ambiguidade operacional, também o número interno do Sites.
+
 ## Segurança, direitos e uso aceitável
 
 - Aceite somente vídeos próprios, licenciados ou autorizados pelo titular.
-- Preserve a confirmação explícita de direitos no fluxo de entrada.
+- Preserve o registro da autorização permanente nos canais privados e a
+  aprovação final explícita de cada publicação.
 - Não contorne contas privadas, autenticação, bloqueios de acesso ou medidas de
   proteção do Instagram.
 - Não automatize sites ou APIs cujos termos proíbam bots, scraping ou downloads
   automatizados. DownReels e ferramentas semelhantes não devem ser usados como
   backend sem uma autorização e uma licença compatíveis.
-- Use as APIs oficiais da Meta e do YouTube para publicar e consultar Insights.
+- Use a API oficial da Meta para publicar e consultar Insights.
 - Solicite apenas as permissões mínimas necessárias da Meta.
 - Nunca coloque senhas, tokens, códigos de verificação, chaves ou valores de
   `.env` em código, logs, commits, capturas ou mensagens.
@@ -115,8 +138,8 @@ A fila automática pode publicar no Instagram sem uma nova intervenção somente
 já tiver sido aprovado explicitamente pelo usuário. A aprovação feita no painel
 é autorização para aquele Reel; ela não autoriza outros itens. Uma autorização
 para implantar o site também não autoriza publicar conteúdo no Instagram, e
-vice-versa. A aprovação multicanal autoriza somente o upload privado no YouTube;
-a mudança para público exige a confirmação separada dos checks daquele Short.
+vice-versa. Não reative aprovações ou uploads multicanal enquanto o experimento
+do YouTube estiver retirado.
 
 ## Git e preservação do trabalho
 
@@ -164,6 +187,8 @@ mais recente.
   agendada; não bloqueie desnecessariamente a resposta HTTP.
 - Falhas externas devem gerar estados recuperáveis e mensagens úteis, sem
   revelar segredos ou respostas sensíveis do provedor.
+- Downloads com falha não ocupam a lista principal, mas devem permanecer
+  visíveis em uma área compacta de recuperação com erro e nova tentativa.
 - Downloads e publicações devem ser idempotentes sempre que possível. Preserve
   a detecção de duplicatas e impeça publicações duplicadas.
 - Não invente métricas indisponíveis. Mostre indisponibilidade ou erro de
@@ -197,6 +222,13 @@ mais recente.
   aprovados.
 - Preserve informações claras de status, erro, agendamento e resultado da
   publicação.
+- Exiba separadamente datas de recebimento/download e de publicação no
+  Instagram. Resumos de hoje, ontem, 7 dias e 30 dias devem derivar de
+  snapshots reais e indicar quando ainda não houver histórico suficiente.
+- Na Produção, use linguagem de usuário final e mostre claramente o estado do
+  Instagram.
+- Em telas mobile, mantenha uma ação principal por próximo passo, sem exigir
+  zoom ou rolagem horizontal.
 
 ## Validação e qualidade
 

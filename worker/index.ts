@@ -3,17 +3,11 @@ import handler from "vinext/server/app-router-entry";
 import {
   YOUTUBE_SCHEMA_STATEMENTS,
   createContentTargets,
-  dispatchYouTubeExecutor,
-  handleYouTubeRequest,
   publicationDestinations,
-  queueYouTubePublication,
-  refreshYouTubeInsights,
-  youtubeAnalyticsPayload,
-  youtubeConnection,
-  youtubeSummaries,
   type ContentTargetInput,
   type YouTubeEnv,
 } from "./youtube";
+import { extractInstagramEmbedVideoUrl, instagramEmbedUrl } from "./instagram-embed";
 
 interface Env extends YouTubeEnv {
   ASSETS: Fetcher;
@@ -30,11 +24,17 @@ interface Env extends YouTubeEnv {
   REEL_RESOLVER_URL?: string;
   REEL_RESOLVER_TOKEN?: string;
   REEL_RESOLVER_AUTH_SCHEME?: string;
+  REEL_DOWNLOAD_WORKFLOW_ID?: string;
+  REEL_DOWNLOAD_WORKFLOW_REF?: string;
+  REEL_DOWNLOAD_WORKER_SECRET?: string;
   INSTAGRAM_ACCESS_TOKEN?: string;
   INSTAGRAM_ACCESS_TOKEN_EXPIRES_AT?: string;
   INSTAGRAM_USER_ID?: string;
   INSTAGRAM_API_VERSION?: string;
   INSTAGRAM_GRAPH_HOST?: string;
+  INSTAGRAM_DIRECT_ALLOWED_USERNAME?: string;
+  META_APP_SECRET?: string;
+  META_VERIFY_TOKEN?: string;
   PUBLISH_URL_SECRET?: string;
 }
 
@@ -65,6 +65,7 @@ type QueueResult = {
 
 type ReelRecord = {
   id: number;
+  sender_id: string;
   source_url: string;
   rules: string | null;
   source_account: string | null;
@@ -112,6 +113,12 @@ type ReelListRow = ReelRecord & {
   published_at: string | null;
   created_at: string;
   completed_at: string | null;
+  instagram_selected: number;
+  rights_basis: "owned" | "licensed" | null;
+  content_context: string | null;
+  made_for_kids: number;
+  contains_synthetic_media: number;
+  paid_product_placement: number;
 };
 
 type InstagramCredentials = {
@@ -135,6 +142,30 @@ type InstagramInsightResult = {
   total_value?: { value?: number };
 };
 
+type InstagramWebhookMessage = {
+  sender?: { id?: string };
+  recipient?: { id?: string };
+  message?: {
+    mid?: string;
+    text?: string;
+    is_echo?: boolean;
+    is_self?: boolean;
+    quick_reply?: { payload?: string };
+    attachments?: Array<{
+      type?: string;
+      payload?: Record<string, unknown>;
+    }>;
+  };
+};
+
+type InstagramWebhookPayload = {
+  object?: string;
+  entry?: Array<{
+    id?: string;
+    messaging?: InstagramWebhookMessage[];
+  }>;
+};
+
 type PublishedReelInsightTarget = {
   id: number;
   instagram_media_id: string;
@@ -148,6 +179,7 @@ const COVER_MODES = new Set<CoverMode>(["fixed", "video", "none"]);
 const DEFAULT_INTERVAL_MINUTES = 60;
 const MIN_INTERVAL_MINUTES = 15;
 const MAX_INTERVAL_MINUTES = 7 * 24 * 60;
+const DIRECT_RIGHTS_PAYLOAD = /^reelvolt:rights:(owned|licensed):(\d+)$/;
 
 const CREATE_REELS = `CREATE TABLE IF NOT EXISTS reels (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,6 +213,8 @@ const CREATE_REELS = `CREATE TABLE IF NOT EXISTS reels (
   instagram_permalink TEXT,
   publish_requested_at TEXT,
   published_at TEXT,
+  archived_at TEXT,
+  media_deleted_at TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   completed_at TEXT
 )`;
@@ -201,6 +235,8 @@ const ADDITIONAL_COLUMNS: Record<string, string> = {
   instagram_permalink: "ALTER TABLE reels ADD COLUMN instagram_permalink TEXT",
   publish_requested_at: "ALTER TABLE reels ADD COLUMN publish_requested_at TEXT",
   published_at: "ALTER TABLE reels ADD COLUMN published_at TEXT",
+  archived_at: "ALTER TABLE reels ADD COLUMN archived_at TEXT",
+  media_deleted_at: "ALTER TABLE reels ADD COLUMN media_deleted_at TEXT",
 };
 
 const CREATE_REELS_INDEX = "CREATE INDEX IF NOT EXISTS reels_created_at_idx ON reels (created_at DESC)";
@@ -208,6 +244,7 @@ const CREATE_REELS_SOURCE_INDEX = "CREATE INDEX IF NOT EXISTS reels_source_url_i
 const CREATE_REELS_PUBLIC_TOKEN_INDEX = "CREATE UNIQUE INDEX IF NOT EXISTS reels_public_token_idx ON reels (public_token)";
 const CREATE_REELS_PUBLISH_INDEX = "CREATE INDEX IF NOT EXISTS reels_publish_status_idx ON reels (publish_status)";
 const CREATE_REELS_SCHEDULE_INDEX = "CREATE INDEX IF NOT EXISTS reels_schedule_idx ON reels (publish_status, scheduled_for)";
+const CREATE_REELS_ACTIVE_INDEX = "CREATE INDEX IF NOT EXISTS reels_active_id_idx ON reels (archived_at, id DESC)";
 const CREATE_STUDIO_SETTINGS = `CREATE TABLE IF NOT EXISTS studio_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   caption_enabled INTEGER NOT NULL DEFAULT 1,
@@ -274,6 +311,23 @@ const REEL_INSIGHT_SNAPSHOT_COLUMNS: Record<string, string> = {
 };
 const CREATE_REEL_INSIGHTS_MILESTONE_INDEX =
   "CREATE UNIQUE INDEX IF NOT EXISTS reel_insight_snapshots_milestone_idx ON reel_insight_snapshots (reel_id, milestone)";
+const CREATE_INSTAGRAM_INSIGHT_SYNC = `CREATE TABLE IF NOT EXISTS instagram_insight_sync (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  status TEXT NOT NULL DEFAULT 'idle',
+  started_at TEXT,
+  completed_at TEXT,
+  last_error TEXT,
+  total_targets INTEGER NOT NULL DEFAULT 0,
+  updated_targets INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`;
+const CREATE_SHORTCUT_ACCESS = `CREATE TABLE IF NOT EXISTS shortcut_access (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  token_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_used_at TEXT,
+  revoked_at TEXT
+)`;
 
 function json(data: unknown, init: ResponseInit = {}) {
   const headers = new Headers(init.headers);
@@ -291,11 +345,13 @@ async function ensureDatabase(env: Env) {
     env.DB.prepare(CREATE_REELS_PUBLIC_TOKEN_INDEX),
     env.DB.prepare(CREATE_STUDIO_SETTINGS),
     env.DB.prepare(CREATE_AUTHORIZED_SENDERS),
+    env.DB.prepare(CREATE_SHORTCUT_ACCESS),
     env.DB.prepare(CREATE_INSTAGRAM_AUTH),
     env.DB.prepare(CREATE_REEL_INSIGHTS),
     env.DB.prepare(CREATE_REEL_INSIGHT_SNAPSHOTS),
     env.DB.prepare(CREATE_REEL_INSIGHTS_DAY_INDEX),
     env.DB.prepare(CREATE_REEL_INSIGHTS_REEL_INDEX),
+    env.DB.prepare(CREATE_INSTAGRAM_INSIGHT_SYNC),
     ...YOUTUBE_SCHEMA_STATEMENTS.map((statement) => env.DB.prepare(statement)),
   ]);
 
@@ -317,6 +373,7 @@ async function ensureDatabase(env: Env) {
   await env.DB.batch([
     env.DB.prepare(CREATE_REELS_PUBLISH_INDEX),
     env.DB.prepare(CREATE_REELS_SCHEDULE_INDEX),
+    env.DB.prepare(CREATE_REELS_ACTIVE_INDEX),
     env.DB.prepare(`INSERT OR IGNORE INTO studio_settings
       (id, caption_enabled, default_caption, cover_mode, auto_publish_enabled, publish_interval_minutes)
       VALUES (1, 1, ?, 'fixed', 0, ?)`)
@@ -324,6 +381,8 @@ async function ensureDatabase(env: Env) {
     env.DB.prepare(`UPDATE reels SET publish_status = 'awaiting_approval'
       WHERE status = 'ready' AND publish_status = 'queued' AND approved_at IS NULL`),
     env.DB.prepare(CREATE_REEL_INSIGHTS_MILESTONE_INDEX),
+    env.DB.prepare(`INSERT OR IGNORE INTO instagram_insight_sync
+      (id, status, total_targets, updated_targets) VALUES (1, 'idle', 0, 0)`),
   ]);
 }
 
@@ -400,15 +459,14 @@ function sanitizeTargets(
     containsSyntheticMedia?: unknown;
     paidProductPlacement?: unknown;
   },
-  defaultDestinations: Array<"instagram" | "youtube">,
+  defaultDestinations: Array<"instagram">,
 ): ContentTargetInput {
   const requested = Array.isArray(destinations)
-    ? destinations.filter((value): value is "instagram" | "youtube" =>
-      value === "instagram" || value === "youtube")
-    : defaultDestinations;
+    ? destinations.filter((value): value is "instagram" => value === "instagram")
+    : defaultDestinations.filter((value): value is "instagram" => value === "instagram");
   return {
     instagramEnabled: requested.includes("instagram"),
-    youtubeEnabled: requested.includes("youtube"),
+    youtubeEnabled: false,
     rightsBasis: input.rightsBasis === "licensed" ? "licensed" : "owned",
     context: sanitizeText(input.context, 800),
     madeForKids: input.madeForKids === true,
@@ -648,6 +706,32 @@ async function resolveVideo(sourceUrl: string, env: Env) {
     }
   }
 
+  const embedUrl = instagramEmbedUrl(sourceUrl);
+  if (embedUrl) {
+    const embed = await fetch(embedUrl, {
+      headers: {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        accept: "text/html,application/xhtml+xml",
+        "accept-language": "en-US,en;q=0.9",
+      },
+      redirect: "follow",
+    });
+    if (embed.ok) {
+      const videoUrl = extractInstagramEmbedVideoUrl(await embed.text());
+      if (videoUrl) {
+        const response = await fetch(videoUrl, {
+          headers: {
+            referer: embedUrl,
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+          },
+          redirect: "follow",
+        });
+        if (response.ok && response.body) return { response };
+        resolverFailure = `arquivo público retornado com HTTP ${response.status}`;
+      }
+    }
+  }
+
   if (env.REEL_RESOLVER_URL) {
     const resolver = await fetch(env.REEL_RESOLVER_URL, {
       method: "POST",
@@ -665,16 +749,16 @@ async function resolveVideo(sourceUrl: string, env: Env) {
         videoQuality: "max",
       }),
     });
+    const result = await resolver.json().catch(() => ({})) as {
+      status?: string;
+      videoUrl?: string;
+      url?: string;
+      download_url?: string;
+      tunnel?: string[];
+      picker?: Array<{ type?: string; url?: string }>;
+      error?: { code?: string };
+    };
     if (resolver.ok) {
-      const result = await resolver.json() as {
-        status?: string;
-        videoUrl?: string;
-        url?: string;
-        download_url?: string;
-        tunnel?: string[];
-        picker?: Array<{ type?: string; url?: string }>;
-        error?: { code?: string };
-      };
       const pickedVideo = result.picker?.find((item) => item.type === "video" && item.url)?.url;
       const videoUrl = result.videoUrl ?? result.url ?? result.download_url ?? pickedVideo ?? result.tunnel?.[0];
       if (typeof videoUrl === "string") {
@@ -685,11 +769,63 @@ async function resolveVideo(sourceUrl: string, env: Env) {
         resolverFailure = result.error?.code || `resposta ${result.status || "sem arquivo"}`;
       }
     } else {
-      resolverFailure = `HTTP ${resolver.status}`;
+      resolverFailure = result.error?.code
+        ? `${result.error.code} (HTTP ${resolver.status})`
+        : `HTTP ${resolver.status}`;
     }
   }
   if (resolverFailure) throw new Error(`O resolvedor não conseguiu obter este Reel (${resolverFailure}).`);
   throw new Error("O Instagram exige login ou o Reel não está publicamente acessível.");
+}
+
+function externalResolverConfigured(env: Env) {
+  return Boolean(env.GITHUB_ACTIONS_TOKEN && env.GITHUB_REPOSITORY);
+}
+
+async function dispatchExternalResolver(record: ReelRecord, env: Env) {
+  if (!externalResolverConfigured(env)) return false;
+  const workflow = encodeURIComponent(env.REEL_DOWNLOAD_WORKFLOW_ID?.trim() || "reel-downloader.yml");
+  const ref = env.REEL_DOWNLOAD_WORKFLOW_REF?.trim() || "master";
+  const baseUrl = env.PUBLIC_BASE_URL?.replace(/\/+$/, "");
+  if (!baseUrl) return false;
+
+  const response = await fetch(
+    `https://api.github.com/repos/${env.GITHUB_REPOSITORY}/actions/workflows/${workflow}/dispatches`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${env.GITHUB_ACTIONS_TOKEN}`,
+        "content-type": "application/json",
+        "user-agent": "ReelVolt-Studio",
+        "x-github-api-version": "2022-11-28",
+      },
+      body: JSON.stringify({
+        ref,
+        inputs: {
+          reel_id: String(record.id),
+          source_url: record.source_url,
+          callback_url: `${baseUrl}/api/internal/reels/${record.id}/resolver-result`,
+        },
+      }),
+    },
+  );
+  if (!response.ok) {
+    const details = sanitizeText(await response.text(), 300);
+    console.warn(`O executor alternativo recusou o Reel #${record.id} (GitHub ${response.status}).`, details);
+    return false;
+  }
+  await env.DB.prepare(`UPDATE reels SET status = 'downloading', error = NULL,
+    publish_status = CASE WHEN publication_mode = 'download_only' THEN 'not_requested' ELSE 'awaiting_download' END,
+    publish_error = NULL WHERE id = ? AND archived_at IS NULL AND status = 'downloading'`)
+    .bind(record.id)
+    .run();
+  return true;
+}
+
+function validDownloadWorker(request: Request, env: Env) {
+  const secret = env.REEL_DOWNLOAD_WORKER_SECRET || env.YOUTUBE_WORKER_SECRET;
+  return Boolean(secret && request.headers.get("authorization") === `Bearer ${secret}`);
 }
 
 async function graphRequest(
@@ -723,6 +859,243 @@ async function graphRequest(
   return result;
 }
 
+async function shortcutTokenHash(token: string) {
+  return base64Url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)));
+}
+
+function newShortcutToken() {
+  return base64Url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+}
+
+async function validShortcutRequest(request: Request, env: Env) {
+  const authorization = request.headers.get("authorization") || "";
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(token)) return false;
+  const tokenHash = await shortcutTokenHash(token);
+  const result = await env.DB.prepare(`UPDATE shortcut_access SET last_used_at = CURRENT_TIMESTAMP
+    WHERE id = 1 AND token_hash = ? AND revoked_at IS NULL`)
+    .bind(tokenHash)
+    .run();
+  return Boolean(result.meta.changes);
+}
+
+function directAllowedUsername(env: Env) {
+  return (env.INSTAGRAM_DIRECT_ALLOWED_USERNAME || "")
+    .trim()
+    .replace(/^@+/, "")
+    .toLowerCase();
+}
+
+function directConfigured(env: Env) {
+  return Boolean(
+    env.META_APP_SECRET
+    && env.META_VERIFY_TOKEN
+    && directAllowedUsername(env)
+    && metaConnected(env),
+  );
+}
+
+async function verifyMetaWebhookSignature(
+  body: ArrayBuffer,
+  signatureHeader: string | null,
+  secret: string | undefined,
+) {
+  if (!secret || !signatureHeader?.startsWith("sha256=")) return false;
+  const suppliedHex = signatureHeader.slice("sha256=".length).toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(suppliedHex)) return false;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const expected = new Uint8Array(await crypto.subtle.sign("HMAC", key, body));
+  const supplied = Uint8Array.from(
+    suppliedHex.match(/.{2}/g) || [],
+    (value) => Number.parseInt(value, 16),
+  );
+  if (supplied.length !== expected.length) return false;
+  let difference = 0;
+  for (let index = 0; index < expected.length; index += 1) {
+    difference |= expected[index] ^ supplied[index];
+  }
+  return difference === 0;
+}
+
+function instagramWebhookMessages(payload: InstagramWebhookPayload) {
+  if (payload.object !== "instagram" || !Array.isArray(payload.entry)) return [];
+  return payload.entry.flatMap((entry) => Array.isArray(entry.messaging) ? entry.messaging : []);
+}
+
+function directSharedReelUrl(message: InstagramWebhookMessage["message"]) {
+  const textUrl = findInstagramUrl(message?.text || "");
+  if (textUrl) return textUrl;
+  const supportedShareTypes = new Set(["share", "media", "video", "ig_reel", "reel"]);
+  for (const attachment of message?.attachments || []) {
+    if (!supportedShareTypes.has((attachment.type || "").toLowerCase())) continue;
+    const candidate = attachment.payload?.url;
+    if (typeof candidate !== "string") continue;
+    const reelUrl = findInstagramUrl(candidate);
+    if (reelUrl) return reelUrl;
+    try {
+      const url = new URL(candidate);
+      const host = url.hostname.toLowerCase();
+      const trustedMediaHost = host === "instagram.com"
+        || host.endsWith(".instagram.com")
+        || host.endsWith(".cdninstagram.com")
+        || host.endsWith(".fbcdn.net");
+      if (url.protocol === "https:" && trustedMediaHost) return url.toString();
+    } catch {
+      // Ignore malformed attachment URLs even when the webhook itself is authentic.
+    }
+  }
+  return null;
+}
+
+async function instagramDirectProfile(senderId: string, env: Env) {
+  const credentials = await instagramCredentials(env);
+  const params = new URLSearchParams({
+    fields: "username",
+    access_token: credentials.accessToken,
+  });
+  const response = await fetch(
+    `${metaBaseUrl(env)}/${encodeURIComponent(senderId)}?${params.toString()}`,
+  );
+  const result = await response.json() as {
+    id?: string;
+    username?: string;
+    error?: { message?: string };
+  };
+  if (!response.ok || result.error) {
+    throw new Error(result.error?.message || "A Meta não confirmou o remetente do Direct.");
+  }
+  return {
+    id: result.id || senderId,
+    username: (result.username || "").replace(/^@+/, "").toLowerCase(),
+  };
+}
+
+async function authorizedDirectSender(senderId: string, env: Env) {
+  const senderKey = `instagram:${senderId}`;
+  const paired = await env.DB.prepare(
+    "SELECT sender_id FROM authorized_senders WHERE sender_id = ?",
+  ).bind(senderKey).first<{ sender_id: string }>();
+  if (paired) return true;
+  const allowedUsername = directAllowedUsername(env);
+  if (!allowedUsername) return false;
+  const profile = await instagramDirectProfile(senderId, env);
+  if (profile.username !== allowedUsername) return false;
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO authorized_senders (sender_id, paired_at) VALUES (?, CURRENT_TIMESTAMP)",
+  ).bind(senderKey).run();
+  return true;
+}
+
+async function sendInstagramDirectMessage(
+  senderId: string,
+  message: Record<string, unknown>,
+  env: Env,
+) {
+  const credentials = await instagramCredentials(env);
+  const response = await fetch(
+    `${metaBaseUrl(env)}/${encodeURIComponent(credentials.userId)}/messages`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${credentials.accessToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        recipient: { id: senderId },
+        messaging_type: "RESPONSE",
+        message,
+      }),
+    },
+  );
+  const result = await response.json() as {
+    message_id?: string;
+    error?: { message?: string; code?: number };
+  };
+  if (!response.ok || result.error) {
+    const details = result.error?.code ? ` (Meta ${result.error.code})` : "";
+    throw new Error(`${result.error?.message || "A Meta não enviou a resposta no Direct."}${details}`);
+  }
+  return result;
+}
+
+async function subscribeInstagramDirect(env: Env) {
+  const credentials = await instagramCredentials(env);
+  const response = await fetch(
+    `${metaBaseUrl(env)}/${encodeURIComponent(credentials.userId)}/subscribed_apps`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${credentials.accessToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        subscribed_fields: ["messages", "messaging_postbacks"],
+      }),
+    },
+  );
+  const result = await response.json() as {
+    success?: boolean;
+    error?: { message?: string; code?: number };
+  };
+  if (!response.ok || result.error || result.success !== true) {
+    const details = result.error?.code ? ` (Meta ${result.error.code})` : "";
+    throw new Error(`${result.error?.message || "A Meta não ativou os eventos do Direct."}${details}`);
+  }
+  return { subscribed: true };
+}
+
+async function requestDirectRights(senderId: string, reelId: number, env: Env) {
+  return sendInstagramDirectMessage(senderId, {
+    text: `Reel #${reelId} recebido. Confirme a autorização para baixar e preparar o conteúdo:`,
+    quick_replies: [
+      {
+        content_type: "text",
+        title: "Conteúdo próprio",
+        payload: `reelvolt:rights:owned:${reelId}`,
+      },
+      {
+        content_type: "text",
+        title: "Licenciado",
+        payload: `reelvolt:rights:licensed:${reelId}`,
+      },
+    ],
+  }, env);
+}
+
+async function sendDirectApprovalButton(
+  senderId: string,
+  reelId: number,
+  baseUrl: string,
+  env: Env,
+) {
+  return sendInstagramDirectMessage(senderId, {
+    attachment: {
+      type: "template",
+      payload: {
+        template_type: "button",
+        text: `O MP4 do Reel #${reelId} está pronto. Revise e autorize a publicação no ReelVolt.`,
+        buttons: [{
+          type: "web_url",
+          url: `${baseUrl}/?approve=${reelId}`,
+          title: "Abrir no ReelVolt",
+        }],
+      },
+    },
+  }, env);
+}
+
+function directSenderId(record: ReelRecord) {
+  return record.sender_id.startsWith("instagram:")
+    ? record.sender_id.slice("instagram:".length)
+    : null;
+}
+
 function insightValue(result: InstagramInsightResult | undefined) {
   const value = result?.total_value?.value ?? result?.values?.[0]?.value ?? 0;
   return Number.isFinite(Number(value)) ? Math.max(0, Math.round(Number(value))) : 0;
@@ -754,6 +1127,7 @@ async function mediaInsightRequest(
 
 async function saveInsightError(reelId: number, error: unknown, env: Env) {
   const message = error instanceof Error ? error.message : "Falha desconhecida ao consultar os Insights.";
+  console.warn(`Falha ao atualizar os Insights do Reel #${reelId}: ${message.slice(0, 500)}`);
   await env.DB.prepare(`INSERT INTO reel_insights (reel_id, last_error, updated_at)
     VALUES (?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(reel_id) DO UPDATE SET last_error = excluded.last_error,
@@ -782,38 +1156,65 @@ function insightMilestone(publishedAt: string | null) {
 
 async function refreshReelInsights(target: PublishedReelInsightTarget, env: Env) {
   try {
-    const primary = await mediaInsightRequest(
-      target.instagram_media_id,
-      ["views", "reach", "likes", "comments", "saved", "shares", "total_interactions"],
-      env,
-    );
-    let watch = new Map<string, number>();
+    const previous = await env.DB.prepare(`SELECT views, reach, likes, comments, saved, shares,
+      total_interactions, average_watch_time_ms, total_watch_time_ms
+      FROM reel_insights WHERE reel_id = ?`).bind(target.id).first<Record<string, number>>();
+    let core: Map<string, number>;
     try {
-      watch = await mediaInsightRequest(
+      core = await mediaInsightRequest(target.instagram_media_id, ["views", "reach"], env);
+    } catch (groupError) {
+      const views = await mediaInsightRequest(target.instagram_media_id, ["views"], env);
+      let reach = new Map<string, number>();
+      try {
+        reach = await mediaInsightRequest(target.instagram_media_id, ["reach"], env);
+      } catch (error) {
+        console.warn(`O alcance do Reel #${target.id} não está disponível:`, error, groupError);
+      }
+      core = new Map([...views, ...reach]);
+    }
+    const [engagementResult, watchResult] = await Promise.allSettled([
+      mediaInsightRequest(
+        target.instagram_media_id,
+        ["likes", "comments", "saved", "shares", "total_interactions"],
+        env,
+      ),
+      mediaInsightRequest(
         target.instagram_media_id,
         ["ig_reels_avg_watch_time", "ig_reels_video_view_total_time"],
         env,
-      );
-    } catch (error) {
-      console.warn(`As métricas de retenção do Reel #${target.id} não estão disponíveis:`, error);
+      ),
+    ]);
+    const engagement = engagementResult.status === "fulfilled"
+      ? engagementResult.value
+      : new Map<string, number>();
+    const watch = watchResult.status === "fulfilled"
+      ? watchResult.value
+      : new Map<string, number>();
+    if (engagementResult.status === "rejected") {
+      console.warn(`As métricas de engajamento do Reel #${target.id} não estão disponíveis:`, engagementResult.reason);
+    }
+    if (watchResult.status === "rejected") {
+      console.warn(`As métricas de retenção do Reel #${target.id} não estão disponíveis:`, watchResult.reason);
     }
 
-    const likes = primary.get("likes") || 0;
-    const comments = primary.get("comments") || 0;
-    const saved = primary.get("saved") || 0;
-    const shares = primary.get("shares") || 0;
-    const totalInteractions = primary.get("total_interactions")
+    const likes = engagement.get("likes") ?? Number(previous?.likes || 0);
+    const comments = engagement.get("comments") ?? Number(previous?.comments || 0);
+    const saved = engagement.get("saved") ?? Number(previous?.saved || 0);
+    const shares = engagement.get("shares") ?? Number(previous?.shares || 0);
+    const totalInteractions = engagement.get("total_interactions")
       || likes + comments + saved + shares;
     const metrics = {
-      views: primary.get("views") || 0,
-      reach: primary.get("reach") || 0,
+      views: core.get("views") ?? Number(previous?.views || 0),
+      reach: core.get("reach") ?? Number(previous?.reach || 0),
       likes,
       comments,
       saved,
       shares,
       totalInteractions,
-      averageWatchTimeMs: watch.get("ig_reels_avg_watch_time") || 0,
-      totalWatchTimeMs: watch.get("ig_reels_video_view_total_time") || 0,
+      averageWatchTimeMs: watch.get("ig_reels_avg_watch_time")
+        ?? Number(previous?.average_watch_time_ms || 0),
+      totalWatchTimeMs: watch.get("ig_reels_video_view_total_time")
+        ?? Number(previous?.total_watch_time_ms || 0),
     };
     const milestone = insightMilestone(target.published_at);
 
@@ -843,7 +1244,7 @@ async function refreshReelInsights(target: PublishedReelInsightTarget, env: Env)
       env.DB.prepare(`INSERT INTO reel_insight_snapshots
         (reel_id, captured_date, views, reach, total_interactions, shares, saved,
           average_watch_time_ms, milestone, captured_minutes, captured_at)
-        VALUES (?, date('now'), ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(reel_id, captured_date) DO UPDATE SET views = excluded.views,
           reach = excluded.reach, total_interactions = excluded.total_interactions,
           shares = excluded.shares, saved = excluded.saved,
@@ -853,6 +1254,7 @@ async function refreshReelInsights(target: PublishedReelInsightTarget, env: Env)
           captured_at = CURRENT_TIMESTAMP`)
         .bind(
           target.id,
+          analyticsDateKey(),
           metrics.views,
           metrics.reach,
           metrics.totalInteractions,
@@ -875,11 +1277,88 @@ async function refreshAllInsights(env: Env) {
     WHERE publish_status = 'published' AND instagram_media_id IS NOT NULL
     ORDER BY published_at DESC LIMIT 100`)
     .all<PublishedReelInsightTarget>();
+  let cursor = 0;
   let updated = 0;
-  for (const target of results) {
-    if (await refreshReelInsights(target, env)) updated += 1;
-  }
+  const workers = Array.from({ length: Math.min(6, results.length) }, async () => {
+    while (cursor < results.length) {
+      const target = results[cursor++];
+      const succeeded = await refreshReelInsights(target, env);
+      if (succeeded) updated += 1;
+      await env.DB.prepare(`UPDATE instagram_insight_sync
+        SET updated_targets = updated_targets + ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1`).bind(succeeded ? 1 : 0).run();
+    }
+  });
+  await Promise.all(workers);
   return { total: results.length, updated };
+}
+
+type InstagramInsightSyncState = {
+  status: string;
+  started_at: string | null;
+  completed_at: string | null;
+  last_error: string | null;
+  total_targets: number;
+  updated_targets: number;
+};
+
+async function insightSyncState(env: Env) {
+  const state = await env.DB.prepare(`SELECT status, started_at, completed_at, last_error,
+    total_targets, updated_targets FROM instagram_insight_sync WHERE id = 1`)
+    .first<InstagramInsightSyncState>();
+  const startedAt = databaseTimestamp(state?.started_at || null);
+  if (state?.status === "running" && Number.isFinite(startedAt)
+    && Date.now() - startedAt > 2 * 60 * 1000) {
+    return {
+      ...state,
+      status: "failed",
+      last_error: "A última sincronização excedeu o tempo esperado. Tente atualizar novamente.",
+    };
+  }
+  return state;
+}
+
+async function claimInsightRefresh(env: Env) {
+  const result = await env.DB.prepare(`UPDATE instagram_insight_sync
+    SET status = 'running', started_at = CURRENT_TIMESTAMP, completed_at = NULL,
+      last_error = NULL, total_targets = 0, updated_targets = 0,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = 1 AND (status <> 'running' OR started_at IS NULL
+      OR datetime(started_at) < datetime('now', '-2 minutes'))`).run();
+  return Number(result.meta.changes || 0) > 0;
+}
+
+async function executeClaimedInsightRefresh(env: Env) {
+  try {
+    const total = await env.DB.prepare(`SELECT COUNT(*) AS total FROM reels
+      WHERE publish_status = 'published' AND instagram_media_id IS NOT NULL`)
+      .first<{ total: number }>();
+    await env.DB.prepare(`UPDATE instagram_insight_sync SET total_targets = ?,
+      updated_at = CURRENT_TIMESTAMP WHERE id = 1`).bind(Number(total?.total || 0)).run();
+    const result = await refreshAllInsights(env);
+    if (result.total > 0 && result.updated === 0) {
+      const latestFailure = await env.DB.prepare(`SELECT last_error FROM reel_insights
+        WHERE last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 1`)
+        .first<{ last_error: string }>();
+      throw new Error(latestFailure?.last_error || "A Meta não retornou métricas para os Reels publicados.");
+    }
+    await env.DB.prepare(`UPDATE instagram_insight_sync SET status = 'idle',
+      completed_at = CURRENT_TIMESTAMP, last_error = NULL, total_targets = ?,
+      updated_targets = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`)
+      .bind(result.total, result.updated).run();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Falha ao atualizar os Insights.";
+    await env.DB.prepare(`UPDATE instagram_insight_sync SET status = 'failed',
+      completed_at = CURRENT_TIMESTAMP, last_error = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1`).bind(message.slice(0, 500)).run();
+    console.error("Falha na sincronização dos Insights do Instagram:", error);
+  }
+}
+
+async function startInsightRefresh(env: Env, ctx: ExecutionContext) {
+  const claimed = await claimInsightRefresh(env);
+  if (claimed) ctx.waitUntil(executeClaimedInsightRefresh(env));
+  return claimed;
 }
 
 function databaseTimestamp(value: string | null) {
@@ -1049,11 +1528,20 @@ async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
   }
 }
 
-async function processReel(record: ReelRecord, env: Env) {
+async function processReel(record: ReelRecord, env: Env, baseUrl?: string) {
   try {
     await env.DB.prepare("UPDATE reels SET status = 'downloading', error = NULL WHERE id = ?")
       .bind(record.id).run();
-    const { response } = await resolveVideo(record.source_url, env);
+    let response: Response;
+    try {
+      ({ response } = await resolveVideo(record.source_url, env));
+    } catch (resolutionError) {
+      if (await dispatchExternalResolver(record, env)) {
+        console.info(`O Reel #${record.id} foi encaminhado ao executor alternativo.`);
+        return;
+      }
+      throw resolutionError;
+    }
     const contentType = response.headers.get("content-type")?.split(";")[0] || "video/mp4";
     if (!contentType.startsWith("video/") && contentType !== "application/octet-stream") {
       throw new Error("A origem não retornou um vídeo.");
@@ -1078,17 +1566,36 @@ async function processReel(record: ReelRecord, env: Env) {
       WHERE id = ?`)
       .bind(storageKey, `reel-${record.id}.mp4`, "video/mp4", stored?.size ?? null, publishStatus, record.id)
       .run();
+    const senderId = directSenderId(record);
+    if (senderId && baseUrl) {
+      try {
+        await sendDirectApprovalButton(senderId, record.id, baseUrl, env);
+      } catch (notificationError) {
+        console.warn(`O Reel #${record.id} ficou pronto, mas o Direct não recebeu o botão de aprovação.`, notificationError);
+      }
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Falha desconhecida";
+    console.error(`Falha ao preparar o Reel #${record.id}: ${message}`);
     await env.DB.prepare(`UPDATE reels SET status = 'failed', error = ?,
       publish_status = CASE WHEN publication_mode = 'download_only' THEN 'not_requested' ELSE 'blocked' END
       WHERE id = ?`)
       .bind(message.slice(0, 500), record.id).run();
+    const senderId = directSenderId(record);
+    if (senderId) {
+      try {
+        await sendInstagramDirectMessage(senderId, {
+          text: `Não foi possível preparar o Reel #${record.id}. Abra o ReelVolt para conferir o erro.`,
+        }, env);
+      } catch (notificationError) {
+        console.warn(`A falha do Reel #${record.id} também não pôde ser avisada no Direct.`, notificationError);
+      }
+    }
   }
 }
 
 async function reelById(id: number, env: Env) {
-  return env.DB.prepare(`SELECT id, source_url, rules, source_account, rights_confirmed, public_token,
+  return env.DB.prepare(`SELECT id, sender_id, source_url, rules, source_account, rights_confirmed, public_token,
     storage_key, filename, content_type, status, publication_mode, share_to_feed, caption,
     caption_enabled, cover_mode, cover_key, approved_at, scheduled_for,
     publish_status, instagram_container_id, publish_requested_at, created_at
@@ -1136,12 +1643,6 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
   const caption = settings.caption_enabled ? settings.default_caption.trim() : "";
   const coverKey = settings.cover_mode === "fixed" ? settings.fixed_cover_key : null;
   const destinations = await publicationDestinations(record.id, env);
-  const youtube = await queueYouTubePublication(
-    record.id,
-    record.source_account,
-    Boolean(record.rights_confirmed),
-    env,
-  );
 
   if (!destinations.instagram) {
     await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
@@ -1150,17 +1651,7 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
       WHERE id = ?`)
       .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, record.id)
       .run();
-    return { queued: false, scheduledFor: null, youtube };
-  }
-
-  if (destinations.youtube && youtube.status === "queued") {
-    await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
-      caption_enabled = ?, cover_mode = ?, cover_key = ?, approved_at = CURRENT_TIMESTAMP,
-      scheduled_for = NULL, publish_status = 'awaiting_metadata', publish_error = NULL
-      WHERE id = ?`)
-      .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, record.id)
-      .run();
-    return { queued: true, scheduledFor: null, youtube, awaitingMetadata: true };
+    return { queued: false, scheduledFor: null };
   }
 
   if (!metaConnected(env)) {
@@ -1171,10 +1662,12 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
       WHERE id = ?`)
       .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, record.id)
       .run();
-    return { queued: false, scheduledFor: null, youtube };
+    return { queued: false, scheduledFor: null };
   }
 
-  if (settings.auto_publish_enabled) {
+  const usesScheduledQueue = Boolean(settings.auto_publish_enabled)
+    || record.sender_id.startsWith("instagram:");
+  if (usesScheduledQueue) {
     const scheduledFor = await nextPublicationTime(env, settings.publish_interval_minutes);
     await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
       caption_enabled = ?, cover_mode = ?, cover_key = ?, approved_at = CURRENT_TIMESTAMP,
@@ -1183,7 +1676,7 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
       WHERE id = ?`)
       .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, scheduledFor, record.id)
       .run();
-    return { queued: true, scheduledFor, youtube };
+    return { queued: true, scheduledFor };
   }
 
   await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
@@ -1196,7 +1689,7 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
   const approved = await reelById(record.id, env);
   if (!approved) throw new Error("O Reel aprovado não pôde ser recarregado.");
   ctx.waitUntil(publishReel(approved, env, baseUrl));
-  return { queued: false, scheduledFor: null, youtube };
+  return { queued: false, scheduledFor: null };
 }
 
 async function processPublicationQueue(env: Env, baseUrl: string) {
@@ -1223,7 +1716,7 @@ async function queueReel(
   ctx: ExecutionContext,
 ): Promise<QueueResult> {
   const existing = await env.DB.prepare(
-    "SELECT id FROM reels WHERE source_url = ? AND status <> 'failed' ORDER BY id DESC LIMIT 1",
+    "SELECT id FROM reels WHERE source_url = ? AND archived_at IS NULL AND status <> 'failed' ORDER BY id DESC LIMIT 1",
   ).bind(input.sourceUrl).first<{ id: number }>();
   if (existing) return { accepted: false, reason: "duplicate", id: existing.id };
 
@@ -1249,7 +1742,7 @@ async function queueReel(
   ).run();
   if (!result.meta.changes) return { accepted: false, reason: "duplicate" };
 
-  const record = await env.DB.prepare(`SELECT id, source_url, rules, source_account, rights_confirmed,
+  const record = await env.DB.prepare(`SELECT id, sender_id, source_url, rules, source_account, rights_confirmed,
     public_token, storage_key, filename, content_type, status, publication_mode, share_to_feed,
     caption, caption_enabled, cover_mode, cover_key, approved_at, scheduled_for,
     publish_status, instagram_container_id, publish_requested_at, created_at
@@ -1303,14 +1796,20 @@ async function serveCover(
 }
 
 async function listReels(env: Env, baseUrl: string) {
-  const { results } = await env.DB.prepare(`SELECT id, source_url, rules, source_account,
-    rights_confirmed, public_token, storage_key, filename, content_type, size_bytes, status, error,
-    publication_mode, share_to_feed, caption, caption_enabled, cover_mode, cover_key,
-    approved_at, scheduled_for, publish_status, publish_error,
-    instagram_container_id, instagram_media_id, instagram_permalink, publish_requested_at,
-    published_at, created_at, completed_at
-    FROM reels WHERE status <> 'failed' ORDER BY id DESC LIMIT 80`).all<ReelListRow>();
-  const summaries = await youtubeSummaries(results.map((row) => row.id), env);
+  const { results } = await env.DB.prepare(`SELECT r.id, r.sender_id, r.source_url, r.rules, r.source_account,
+    r.rights_confirmed, r.public_token, r.storage_key, r.filename, r.content_type, r.size_bytes,
+    r.status, r.error, r.publication_mode, r.share_to_feed, r.caption, r.caption_enabled,
+    r.cover_mode, r.cover_key, r.approved_at, r.scheduled_for, r.publish_status, r.publish_error,
+    r.instagram_container_id, r.instagram_media_id, r.instagram_permalink, r.publish_requested_at,
+    r.published_at, r.created_at, r.completed_at,
+    COALESCE(cr.instagram_enabled,
+      CASE WHEN r.publication_mode = 'download_only' THEN 0 ELSE 1 END) AS instagram_selected,
+    cr.rights_basis, cr.context AS content_context,
+    COALESCE(cr.made_for_kids, 0) AS made_for_kids,
+    COALESCE(cr.contains_synthetic_media, 0) AS contains_synthetic_media,
+    COALESCE(cr.paid_product_placement, 0) AS paid_product_placement
+    FROM reels r LEFT JOIN content_reviews cr ON cr.reel_id = r.id
+    WHERE r.archived_at IS NULL AND r.status <> 'failed' ORDER BY r.id DESC`).all<ReelListRow>();
   return results.map((row) => ({
     ...row,
     download_url: row.status === "ready" && row.public_token
@@ -1318,30 +1817,341 @@ async function listReels(env: Env, baseUrl: string) {
       : null,
     public_token: undefined,
     storage_key: undefined,
-    youtube: summaries.get(row.id) || null,
+    sender_id: undefined,
+    rights_confirmed: Boolean(row.rights_confirmed),
+    intake_source: row.sender_id.startsWith("instagram:") ? "instagram_direct" : "web",
+    instagram_selected: Boolean(row.instagram_selected),
+    made_for_kids: Boolean(row.made_for_kids),
+    contains_synthetic_media: Boolean(row.contains_synthetic_media),
+    paid_product_placement: Boolean(row.paid_product_placement),
   }));
+}
+
+async function listRecentFailedReels(env: Env) {
+  const { results } = await env.DB.prepare(`SELECT id, source_url, source_account, status, error,
+    publication_mode, publish_status, created_at
+    FROM reels
+    WHERE archived_at IS NULL AND status = 'failed'
+    ORDER BY id DESC LIMIT 5`).all<{
+      id: number;
+      source_url: string;
+      source_account: string | null;
+      status: string;
+      error: string | null;
+      publication_mode: "download_only" | "approval" | "auto";
+      publish_status: string;
+      created_at: string;
+    }>();
+  return results;
+}
+
+async function retryFailedReel(id: number, env: Env, ctx: ExecutionContext) {
+  const claimed = await env.DB.prepare(`UPDATE reels SET status = 'queued', error = NULL,
+    publish_status = CASE WHEN publication_mode = 'download_only' THEN 'not_requested' ELSE 'awaiting_download' END,
+    publish_error = NULL
+    WHERE id = ? AND archived_at IS NULL AND status = 'failed'`)
+    .bind(id)
+    .run();
+  if (!claimed.meta.changes) return false;
+  const record = await reelById(id, env);
+  if (!record) return false;
+  ctx.waitUntil(processReel(record, env));
+  return true;
+}
+
+async function uploadFailedReelMedia(
+  id: number,
+  body: ReadableStream,
+  upload: { type: string; name: string; declaredSize: number | null },
+  request: Request,
+  env: Env,
+) {
+  const isMp4 = upload.type === "video/mp4"
+    || ((!upload.type || upload.type === "application/octet-stream") && /\.mp4$/i.test(upload.name));
+  if (!isMp4) {
+    return { error: "Selecione um arquivo MP4.", status: 415 } as const;
+  }
+  if (upload.declaredSize === 0) return { error: "O arquivo MP4 está vazio.", status: 400 } as const;
+  if (upload.declaredSize != null && upload.declaredSize > 90 * 1024 * 1024) {
+    return { error: "O MP4 deve ter no máximo 90 MB.", status: 413 } as const;
+  }
+
+  const record = await env.DB.prepare(`SELECT id, source_url, source_account, rights_confirmed,
+    rules, publication_mode FROM reels
+    WHERE id = ? AND archived_at IS NULL AND status = 'failed'`)
+    .bind(id)
+    .first<Pick<ReelRecord,
+      "id" | "source_url" | "source_account" | "rights_confirmed" | "rules" | "publication_mode"
+    >>();
+  if (!record) {
+    return { error: "Este Reel não está mais disponível para receber um MP4.", status: 409 } as const;
+  }
+
+  const storageKey = `reels/${record.id}-${crypto.randomUUID()}.mp4`;
+  try {
+    await env.VIDEOS.put(storageKey, body, {
+      httpMetadata: { contentType: "video/mp4" },
+      customMetadata: {
+        sourceUrl: record.source_url,
+        sourceAccount: (record.source_account || "").slice(0, 128),
+        rightsConfirmed: String(Boolean(record.rights_confirmed)),
+        rules: (record.rules || "").slice(0, 1024),
+        uploadedBy: authenticatedEmail(request).slice(0, 160),
+        originalName: upload.name.slice(0, 160),
+      },
+    });
+    const stored = await env.VIDEOS.head(storageKey);
+    if (!stored?.size) throw new Error("O arquivo não foi confirmado no armazenamento.");
+    if (stored.size > 90 * 1024 * 1024) {
+      await env.VIDEOS.delete(storageKey);
+      return { error: "O MP4 deve ter no máximo 90 MB.", status: 413 } as const;
+    }
+    const publishStatus = record.publication_mode === "download_only" ? "not_requested" : "awaiting_approval";
+    const updated = await env.DB.prepare(`UPDATE reels SET status = 'ready', storage_key = ?, filename = ?, content_type = 'video/mp4',
+      size_bytes = ?, completed_at = CURRENT_TIMESTAMP, error = NULL, publish_status = ?, publish_error = NULL
+      WHERE id = ? AND status = 'failed'`)
+      .bind(storageKey, `reel-${record.id}.mp4`, stored.size, publishStatus, record.id)
+      .run();
+    if (!updated.meta.changes) {
+      await env.VIDEOS.delete(storageKey);
+      return { error: "Este Reel já está sendo processado.", status: 409 } as const;
+    }
+    return { ready: true as const };
+  } catch (error) {
+    await env.VIDEOS.delete(storageKey).catch(() => undefined);
+    const message = error instanceof Error ? error.message : "Falha ao armazenar o MP4.";
+    await env.DB.prepare("UPDATE reels SET error = ? WHERE id = ? AND status = 'failed'")
+      .bind(message.slice(0, 500), id)
+      .run();
+    return { error: message, status: 500 } as const;
+  }
+}
+
+async function receiveResolvedReelMedia(id: number, request: Request, env: Env) {
+  const record = await env.DB.prepare(`SELECT id, source_url, source_account, rights_confirmed,
+    rules, publication_mode FROM reels
+    WHERE id = ? AND archived_at IS NULL AND status = 'downloading' AND storage_key IS NULL`)
+    .bind(id)
+    .first<Pick<ReelRecord,
+      "id" | "source_url" | "source_account" | "rights_confirmed" | "rules" | "publication_mode"
+    >>();
+  if (!record) return { error: "Este Reel não está aguardando o executor alternativo.", status: 409 } as const;
+
+  const requestType = (request.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+  if (requestType === "application/json") {
+    const data = await request.json().catch(() => ({})) as { error?: string };
+    const detail = sanitizeText(data.error, 180) || "O executor alternativo não conseguiu obter o MP4.";
+    await env.DB.prepare(`UPDATE reels SET status = 'failed', error = ?,
+      publish_status = CASE WHEN publication_mode = 'download_only' THEN 'not_requested' ELSE 'blocked' END
+      WHERE id = ? AND status = 'downloading' AND storage_key IS NULL`)
+      .bind(detail, id)
+      .run();
+    return { failed: true as const };
+  }
+
+  if (!request.body || !["video/mp4", "application/octet-stream"].includes(requestType)) {
+    return { error: "O executor alternativo não enviou um MP4 válido.", status: 415 } as const;
+  }
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > 90 * 1024 * 1024) {
+    return { error: "O MP4 deve ter no máximo 90 MB.", status: 413 } as const;
+  }
+
+  const storageKey = `reels/${record.id}-${crypto.randomUUID()}.mp4`;
+  try {
+    await env.VIDEOS.put(storageKey, request.body, {
+      httpMetadata: { contentType: "video/mp4" },
+      customMetadata: {
+        sourceUrl: record.source_url,
+        sourceAccount: (record.source_account || "").slice(0, 128),
+        rightsConfirmed: String(Boolean(record.rights_confirmed)),
+        rules: (record.rules || "").slice(0, 1024),
+        uploadedBy: "github-actions-resolver",
+      },
+    });
+    const stored = await env.VIDEOS.head(storageKey);
+    if (!stored?.size || stored.size > 90 * 1024 * 1024) {
+      await env.VIDEOS.delete(storageKey);
+      return {
+        error: stored?.size ? "O MP4 deve ter no máximo 90 MB." : "O arquivo recebido está vazio.",
+        status: stored?.size ? 413 : 400,
+      } as const;
+    }
+    const publishStatus = record.publication_mode === "download_only" ? "not_requested" : "awaiting_approval";
+    const updated = await env.DB.prepare(`UPDATE reels SET status = 'ready', storage_key = ?,
+      filename = ?, content_type = 'video/mp4', size_bytes = ?, completed_at = CURRENT_TIMESTAMP,
+      error = NULL, publish_status = ?, publish_error = NULL
+      WHERE id = ? AND status = 'downloading' AND storage_key IS NULL`)
+      .bind(storageKey, `reel-${record.id}.mp4`, stored.size, publishStatus, record.id)
+      .run();
+    if (!updated.meta.changes) {
+      await env.VIDEOS.delete(storageKey);
+      return { error: "Este Reel já foi concluído por outra tentativa.", status: 409 } as const;
+    }
+    return { ready: true as const };
+  } catch (error) {
+    await env.VIDEOS.delete(storageKey).catch(() => undefined);
+    const message = error instanceof Error ? error.message : "Falha ao armazenar o MP4 alternativo.";
+    await env.DB.prepare(`UPDATE reels SET status = 'failed', error = ?,
+      publish_status = CASE WHEN publication_mode = 'download_only' THEN 'not_requested' ELSE 'blocked' END
+      WHERE id = ? AND status = 'downloading' AND storage_key IS NULL`)
+      .bind(message.slice(0, 500), id)
+      .run();
+    return { error: message, status: 500 } as const;
+  }
+}
+
+async function archiveReelMedia(id: number, env: Env) {
+  const record = await env.DB.prepare(`SELECT id, storage_key, status, publish_status,
+    instagram_media_id, instagram_permalink FROM reels
+    WHERE id = ? AND archived_at IS NULL`)
+    .bind(id)
+    .first<{
+      id: number;
+      storage_key: string | null;
+      status: string;
+      publish_status: string;
+      instagram_media_id: string | null;
+      instagram_permalink: string | null;
+    }>();
+  if (!record) return { found: false as const };
+  if (record.status !== "ready") {
+    return { found: true as const, blocked: true as const, preparing: true as const };
+  }
+  if (["queued", "creating", "processing", "publishing"].includes(record.publish_status)) {
+    return { found: true as const, blocked: true as const };
+  }
+
+  if (record.storage_key) await env.VIDEOS.delete(record.storage_key);
+  await env.DB.prepare(`UPDATE reels SET archived_at = CURRENT_TIMESTAMP,
+    media_deleted_at = CASE WHEN storage_key IS NOT NULL THEN CURRENT_TIMESTAMP ELSE media_deleted_at END,
+    storage_key = NULL, filename = NULL, content_type = NULL, size_bytes = NULL,
+    public_token = NULL, error = NULL
+    WHERE id = ? AND archived_at IS NULL`)
+    .bind(id)
+    .run();
+  return {
+    found: true as const,
+    blocked: false as const,
+    metricsPreserved: Boolean(record.instagram_media_id || record.instagram_permalink),
+  };
+}
+
+type ViewHistoryRow = {
+  captured_date: string;
+  views: number;
+  reach?: number;
+  total_interactions?: number;
+  shares?: number;
+  saved?: number;
+};
+
+function analyticsDateKey(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const value = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value || "";
+  return `${value("year")}-${value("month")}-${value("day")}`;
+}
+
+function shiftDateKey(value: string, days: number) {
+  const date = new Date(`${value}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function percentageChange(current: number | null, previous: number | null) {
+  if (current == null || previous == null || previous <= 0) return null;
+  return Number((((current - previous) / previous) * 100).toFixed(1));
+}
+
+function viewPeriodSummary(
+  currentViews: number,
+  history: ViewHistoryRow[],
+  oldestPublishedAt: string | null,
+) {
+  const today = analyticsDateKey();
+  const byDate = new Map(history.map((row) => [row.captured_date, Number(row.views || 0)]));
+  const cumulative = (date: string) => byDate.has(date) ? byDate.get(date) as number : null;
+  const delta = (end: number | null, start: number | null) =>
+    end == null || start == null ? null : Math.max(0, end - start);
+
+  const yesterdayKey = shiftDateKey(today, -1);
+  const dayBeforeKey = shiftDateKey(today, -2);
+  const weekStart = shiftDateKey(today, -7);
+  const priorWeekStart = shiftDateKey(today, -14);
+  const monthStart = shiftDateKey(today, -30);
+  const priorMonthStart = shiftDateKey(today, -60);
+
+  const yesterdayTotal = cumulative(yesterdayKey);
+  const dayBeforeTotal = cumulative(dayBeforeKey);
+  const oldestTimestamp = databaseTimestamp(oldestPublishedAt);
+  const oldestPublishedDate = Number.isFinite(oldestTimestamp)
+    ? analyticsDateKey(new Date(oldestTimestamp))
+    : null;
+  const weekBaseline = cumulative(weekStart)
+    ?? (oldestPublishedDate && oldestPublishedDate >= weekStart ? 0 : null);
+  const priorWeekBaseline = cumulative(priorWeekStart);
+  const monthBaseline = cumulative(monthStart)
+    ?? (oldestPublishedDate && oldestPublishedDate >= monthStart ? 0 : null);
+  const priorMonthBaseline = cumulative(priorMonthStart);
+  const todayViews = delta(currentViews, yesterdayTotal);
+  const yesterdayViews = delta(yesterdayTotal, dayBeforeTotal);
+  const weekViews = delta(currentViews, weekBaseline);
+  const previousWeekViews = delta(weekBaseline, priorWeekBaseline);
+  const monthViews = delta(currentViews, monthBaseline);
+  const previousMonthViews = delta(monthBaseline, priorMonthBaseline);
+
+  return {
+    timezone: "America/Sao_Paulo",
+    as_of: today,
+    today: {
+      views: todayViews,
+      previous_views: yesterdayViews,
+      change_percent: percentageChange(todayViews, yesterdayViews),
+      available: todayViews != null,
+    },
+    yesterday: {
+      views: yesterdayViews,
+      available: yesterdayViews != null,
+    },
+    week: {
+      views: weekViews,
+      previous_views: previousWeekViews,
+      change_percent: percentageChange(weekViews, previousWeekViews),
+      average_per_day: weekViews == null ? null : Math.round(weekViews / 7),
+      available: weekViews != null,
+    },
+    month: {
+      views: monthViews,
+      previous_views: previousMonthViews,
+      change_percent: percentageChange(monthViews, previousMonthViews),
+      average_per_day: monthViews == null ? null : Math.round(monthViews / 30),
+      available: monthViews != null,
+    },
+  };
 }
 
 async function dashboard(env: Env, baseUrl: string) {
   const row = await env.DB.prepare(`SELECT
     COUNT(*) AS total,
-    SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END) AS ready,
+    SUM(CASE WHEN archived_at IS NULL AND status = 'ready' THEN 1 ELSE 0 END) AS ready,
     SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS download_failed,
-    SUM(CASE WHEN publish_status = 'awaiting_approval' THEN 1 ELSE 0 END) AS awaiting_approval,
-    SUM(CASE WHEN publish_status IN ('creating', 'processing', 'publishing', 'queued') THEN 1 ELSE 0 END) AS publishing,
+    SUM(CASE WHEN archived_at IS NULL AND publish_status = 'awaiting_approval' THEN 1 ELSE 0 END) AS awaiting_approval,
+    SUM(CASE WHEN archived_at IS NULL AND publish_status IN ('creating', 'processing', 'publishing', 'queued') THEN 1 ELSE 0 END) AS publishing,
     SUM(CASE WHEN publish_status = 'published' THEN 1 ELSE 0 END) AS published,
     SUM(CASE WHEN publish_status = 'failed' THEN 1 ELSE 0 END) AS publish_failed,
     COALESCE(SUM(size_bytes), 0) AS stored_bytes,
     SUM(CASE WHEN date(created_at) >= date('now', '-6 days') THEN 1 ELSE 0 END) AS last_seven_days
     FROM reels`).first<Record<string, number | null>>();
   const preferences = await studioSettings(env);
-  const youtubeMetrics = await env.DB.prepare(`SELECT
-    SUM(CASE WHEN status IN ('queued', 'leased', 'analyzing', 'uploading', 'processing') THEN 1 ELSE 0 END) AS processing,
-    SUM(CASE WHEN status = 'awaiting_studio_check' THEN 1 ELSE 0 END) AS awaiting_checks,
-    SUM(CASE WHEN status = 'published' THEN 1 ELSE 0 END) AS published,
-    SUM(CASE WHEN status IN ('failed', 'blocked') THEN 1 ELSE 0 END) AS failed
-    FROM youtube_publications`).first<Record<string, number | null>>();
-  const youtube = await youtubeConnection(env);
+  const shortcut = await env.DB.prepare(
+    "SELECT id FROM shortcut_access WHERE id = 1 AND revoked_at IS NULL",
+  ).first<{ id: number }>();
   return {
     metrics: {
       total: Number(row?.total || 0),
@@ -1352,25 +2162,26 @@ async function dashboard(env: Env, baseUrl: string) {
       failed: Number(row?.download_failed || 0) + Number(row?.publish_failed || 0),
       stored_bytes: Number(row?.stored_bytes || 0),
       last_seven_days: Number(row?.last_seven_days || 0),
-      youtube_processing: Number(youtubeMetrics?.processing || 0),
-      youtube_awaiting_checks: Number(youtubeMetrics?.awaiting_checks || 0),
-      youtube_published: Number(youtubeMetrics?.published || 0),
-      youtube_failed: Number(youtubeMetrics?.failed || 0),
     },
     settings: {
       meta_connected: metaConnected(env),
+      direct_configured: directConfigured(env),
+      direct_allowed_username: directAllowedUsername(env)
+        ? `@${directAllowedUsername(env)}`
+        : null,
+      shortcut_configured: Boolean(shortcut),
       resolver_connected: Boolean(env.REEL_RESOLVER_URL),
       ...settingsPayload(preferences, baseUrl),
       account: "@btsupply_",
-      youtube,
     },
   };
 }
 
 async function analyticsDashboard(env: Env, baseUrl: string) {
+  const currentSync = await insightSyncState(env);
   const { results } = await env.DB.prepare(`SELECT
     r.id, r.source_account, r.source_url, r.instagram_media_id, r.instagram_permalink,
-    r.published_at, r.created_at,
+    r.published_at, r.created_at, r.completed_at,
     COALESCE(i.views, 0) AS views, COALESCE(i.reach, 0) AS reach,
     COALESCE(i.likes, 0) AS likes, COALESCE(i.comments, 0) AS comments,
     COALESCE(i.saved, 0) AS saved, COALESCE(i.shares, 0) AS shares,
@@ -1388,6 +2199,7 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
       instagram_permalink: string | null;
       published_at: string | null;
       created_at: string;
+      completed_at: string | null;
       views: number;
       reach: number;
       likes: number;
@@ -1404,7 +2216,7 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
     SUM(views) AS views, SUM(reach) AS reach, SUM(total_interactions) AS total_interactions,
     SUM(shares) AS shares, SUM(saved) AS saved
     FROM reel_insight_snapshots GROUP BY captured_date
-    ORDER BY captured_date DESC LIMIT 30`).all<{
+    ORDER BY captured_date DESC LIMIT 61`).all<{
       captured_date: string;
       views: number;
       reach: number;
@@ -1436,8 +2248,11 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
   const attempted = results.filter((row) => row.updated_at);
   const lastSyncedAt = successful.map((row) => row.updated_at as string).sort().at(-1) || null;
   const lastAttemptAt = attempted.map((row) => row.updated_at as string).sort().at(-1) || null;
-  const permissionRequired = results.some((row) =>
-    /permission|permissão|access token|OAuthException|not authorized|Meta 10\b/i.test(row.last_error || ""));
+  const latestError = currentSync?.last_error
+    || results.find((row) => row.last_error)?.last_error
+    || null;
+  const permissionRequired = /permission|permissão|access token|OAuthException|not authorized|Meta 10\b/i
+    .test(latestError || "");
   const attemptTimestamp = databaseTimestamp(lastAttemptAt);
   const refreshDue = results.length > 0 && (
     !Number.isFinite(attemptTimestamp)
@@ -1447,6 +2262,21 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
   const engagementRate = totals.reach ? (totals.interactions / totals.reach) * 100 : 0;
   const shareRate = totals.views ? (totals.shares / totals.views) * 100 : 0;
   const saveRate = totals.views ? (totals.saved / totals.views) * 100 : 0;
+  const oldestPublishedAt = results
+    .map((row) => row.published_at)
+    .filter((value): value is string => Boolean(value))
+    .sort()[0] || null;
+  const publicationHistory = Array.from(results.reduce((days, row) => {
+    const publishedTimestamp = databaseTimestamp(row.published_at);
+    if (!Number.isFinite(publishedTimestamp)) return days;
+    const publishedDate = analyticsDateKey(new Date(publishedTimestamp));
+    const current = days.get(publishedDate) || { published_date: publishedDate, views: 0, reels: 0 };
+    current.views += Number(row.views || 0);
+    current.reels += 1;
+    days.set(publishedDate, current);
+    return days;
+  }, new Map<string, { published_date: string; views: number; reels: number }>()).values())
+    .sort((left, right) => left.published_date.localeCompare(right.published_date));
   const recommendations: Array<{ title: string; body: string; tone: string }> = [];
 
   if (!successful.length) {
@@ -1504,9 +2334,11 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
       save_rate: Number(saveRate.toFixed(2)),
       total_watch_time_ms: totals.watchTimeMs,
     },
+    periods: viewPeriodSummary(totals.views, historyRows, oldestPublishedAt),
     reels: results.map((row, index) => ({
       ...row,
       rank: index + 1,
+      downloaded_at: row.completed_at,
       cover_url: `${baseUrl}${COVER_PATH}`,
       engagement_rate: row.reach
         ? Number(((row.total_interactions / row.reach) * 100).toFixed(2))
@@ -1516,8 +2348,8 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
       last_error: undefined,
     })),
     history: historyRows.reverse(),
+    publication_history: publicationHistory,
     recommendations,
-    youtube: await youtubeAnalyticsPayload(env),
     sync: {
       status: permissionRequired
         ? "permission_required"
@@ -1527,33 +2359,222 @@ async function analyticsDashboard(env: Env, baseUrl: string) {
             ? "waiting"
             : "empty",
       last_synced_at: lastSyncedAt,
-      last_attempt_at: lastAttemptAt,
+      last_attempt_at: currentSync?.started_at || lastAttemptAt,
       refresh_due: refreshDue,
+      refreshing: currentSync?.status === "running",
+      total_targets: Number(currentSync?.total_targets || 0),
+      updated_targets: Number(currentSync?.updated_targets || 0),
       permission_required: permissionRequired,
       message: permissionRequired
         ? "A conta precisa autorizar instagram_business_manage_insights."
-        : null,
+        : currentSync?.status === "failed"
+          ? currentSync.last_error
+          : null,
     },
   };
 }
 
+async function receiveDirectReel(
+  senderId: string,
+  messageId: string,
+  sourceUrl: string,
+  env: Env,
+  baseUrl: string,
+) {
+  const existing = await env.DB.prepare(`SELECT id, status FROM reels
+    WHERE source_url = ? AND archived_at IS NULL AND status <> 'failed' ORDER BY id DESC LIMIT 1`)
+    .bind(sourceUrl).first<{ id: number; status: string }>();
+  if (existing) {
+    if (existing.status === "ready") {
+      await sendDirectApprovalButton(senderId, existing.id, baseUrl, env);
+    } else if (existing.status === "awaiting_rights") {
+      await requestDirectRights(senderId, existing.id, env);
+    } else {
+      await sendInstagramDirectMessage(senderId, {
+        text: `Esse Reel já está registrado como #${existing.id} e continua em processamento.`,
+      }, env);
+    }
+    return existing.id;
+  }
+
+  await env.DB.prepare(`INSERT OR IGNORE INTO reels
+    (message_id, sender_id, source_url, rules, source_account, rights_confirmed, public_token,
+      status, publication_mode, share_to_feed, caption, publish_status)
+    VALUES (?, ?, ?, 'fixed_cover_caption', NULL, 1, ?, 'queued',
+      'approval', 1, ?, 'awaiting_download')`)
+    .bind(
+      `instagram:${messageId}`,
+      `instagram:${senderId}`,
+      sourceUrl,
+      crypto.randomUUID(),
+      FIXED_CAPTION,
+    )
+    .run();
+  const row = await env.DB.prepare(
+    "SELECT id FROM reels WHERE message_id = ?",
+  ).bind(`instagram:${messageId}`).first<{ id: number }>();
+  if (!row?.id) {
+    throw new Error("O Reel recebido pelo Direct não pôde ser registrado.");
+  }
+  await createContentTargets(row.id, {
+    instagramEnabled: true,
+    youtubeEnabled: false,
+    rightsBasis: "licensed",
+    context: `Recebido por Instagram Direct de @${directAllowedUsername(env)} com autorização permanente.`,
+    madeForKids: false,
+    containsSyntheticMedia: false,
+    paidProductPlacement: false,
+  }, env);
+  await sendInstagramDirectMessage(senderId, {
+    text: `Reel #${row.id} recebido. A autorização permanente foi aplicada e o MP4 será preparado agora.`,
+  }, env);
+  const record = await reelById(row.id, env);
+  if (!record) throw new Error("O Reel recebido pelo Direct não pôde ser recarregado.");
+  await processReel(record, env, baseUrl);
+  return row.id;
+}
+
+async function confirmDirectRights(
+  senderId: string,
+  reelId: number,
+  rightsBasis: "owned" | "licensed",
+  env: Env,
+  baseUrl: string,
+) {
+  const expectedSender = `instagram:${senderId}`;
+  const current = await env.DB.prepare(`SELECT id, status, rights_confirmed FROM reels
+    WHERE id = ? AND sender_id = ?`)
+    .bind(reelId, expectedSender)
+    .first<{ id: number; status: string; rights_confirmed: number }>();
+  if (!current) return;
+
+  if (current.rights_confirmed) {
+    if (current.status === "ready") {
+      await sendDirectApprovalButton(senderId, reelId, baseUrl, env);
+    } else {
+      await sendInstagramDirectMessage(senderId, {
+        text: `Os direitos do Reel #${reelId} já foram confirmados. O MP4 continua sendo preparado.`,
+      }, env);
+    }
+    return;
+  }
+  if (current.status !== "awaiting_rights") return;
+
+  await createContentTargets(reelId, {
+    instagramEnabled: true,
+    youtubeEnabled: false,
+    rightsBasis,
+    context: `Recebido por Instagram Direct de @${directAllowedUsername(env)}.`,
+    madeForKids: false,
+    containsSyntheticMedia: false,
+    paidProductPlacement: false,
+  }, env);
+  const claimed = await env.DB.prepare(`UPDATE reels SET rights_confirmed = 1,
+    status = 'queued', publish_status = 'awaiting_download', error = NULL
+    WHERE id = ? AND sender_id = ? AND status = 'awaiting_rights' AND rights_confirmed = 0`)
+    .bind(reelId, expectedSender)
+    .run();
+  if (!claimed.meta.changes) return;
+  const record = await reelById(reelId, env);
+  if (!record) throw new Error("O Reel confirmado no Direct não pôde ser recarregado.");
+  await sendInstagramDirectMessage(senderId, {
+    text: `Autorização registrada para o Reel #${reelId}. O MP4 será baixado e preparado agora.`,
+  }, env);
+  await processReel(record, env, baseUrl);
+}
+
+async function handleInstagramDirectWebhook(
+  payload: InstagramWebhookPayload,
+  env: Env,
+  baseUrl: string,
+) {
+  for (const event of instagramWebhookMessages(payload)) {
+    try {
+      const message = event.message;
+      const senderId = event.sender?.id || "";
+      const recipientId = event.recipient?.id || "";
+      const messageId = message?.mid || "";
+      if (!message || !senderId || !messageId || message.is_echo) continue;
+      if (env.INSTAGRAM_USER_ID && recipientId && recipientId !== env.INSTAGRAM_USER_ID) continue;
+      if (!await authorizedDirectSender(senderId, env)) continue;
+
+      const rightsMatch = (message.quick_reply?.payload || "").match(DIRECT_RIGHTS_PAYLOAD);
+      if (rightsMatch) {
+        const rightsBasis = rightsMatch[1] === "licensed" ? "licensed" : "owned";
+        await confirmDirectRights(senderId, Number(rightsMatch[2]), rightsBasis, env, baseUrl);
+        continue;
+      }
+
+      const sourceUrl = directSharedReelUrl(message);
+      if (sourceUrl) {
+        await receiveDirectReel(senderId, messageId, sourceUrl, env, baseUrl);
+      }
+    } catch (error) {
+      console.error("Falha ao processar um evento assinado do Instagram Direct.", error);
+    }
+  }
+}
+
 async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<Response | null> {
   const url = new URL(request.url);
+  const instagramWebhookRoute = url.pathname === "/webhooks/instagram";
   const isPublicDownload = /^\/download\/[0-9a-f-]{36}$/i.test(url.pathname);
   const publishMediaMatch = url.pathname.match(/^\/publish-media\/(\d+)\.mp4$/);
   const publishCoverMatch = url.pathname.match(/^\/publish-cover\/(\d+)\.jpg$/);
   const workerMediaRoute = /^\/worker-media\/\d+\.mp4$/.test(url.pathname);
-  if (!url.pathname.startsWith("/api/") && !isPublicDownload && !publishMediaMatch
-    && !publishCoverMatch && !workerMediaRoute) return null;
+  if (!url.pathname.startsWith("/api/") && !instagramWebhookRoute && !isPublicDownload
+    && !publishMediaMatch && !publishCoverMatch && !workerMediaRoute) return null;
+
+  if (instagramWebhookRoute && request.method === "GET") {
+    const mode = url.searchParams.get("hub.mode");
+    const token = url.searchParams.get("hub.verify_token");
+    const challenge = url.searchParams.get("hub.challenge");
+    if (mode === "subscribe" && challenge && env.META_VERIFY_TOKEN && token === env.META_VERIFY_TOKEN) {
+      return new Response(challenge, {
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
+          "cache-control": "no-store",
+          "x-content-type-options": "nosniff",
+        },
+      });
+    }
+    return json({ error: "Verificação do webhook recusada." }, { status: 403 });
+  }
+
+  if (instagramWebhookRoute && request.method === "POST") {
+    const rawBody = await request.arrayBuffer();
+    const validSignature = await verifyMetaWebhookSignature(
+      rawBody,
+      request.headers.get("x-hub-signature-256"),
+      env.META_APP_SECRET,
+    );
+    if (!validSignature) return json({ error: "Assinatura do webhook inválida." }, { status: 401 });
+    let payload: InstagramWebhookPayload;
+    try {
+      payload = JSON.parse(new TextDecoder().decode(rawBody)) as InstagramWebhookPayload;
+    } catch {
+      return json({ error: "Corpo do webhook inválido." }, { status: 400 });
+    }
+    await ensureDatabase(env);
+    const baseUrl = publicBaseUrl(request.url, env);
+    ctx.waitUntil(handleInstagramDirectWebhook(payload, env, baseUrl));
+    return json({ received: true });
+  }
 
   await ensureDatabase(env);
   const baseUrl = publicBaseUrl(request.url, env);
-  const youtubeResponse = await handleYouTubeRequest(request, env, {
-    userEmail: authenticatedEmail(request),
-    validUser: validInboxUser(request, env),
-    validOrigin: validWriteOrigin(request),
-  });
-  if (youtubeResponse) return youtubeResponse;
+
+  if (/^\/(?:api\/youtube|api\/internal\/youtube|api\/reels\/\d+\/youtube|worker-media)\b/.test(url.pathname)) {
+    return json({ error: "A publicação no YouTube foi retirada do ReelVolt." }, { status: 410 });
+  }
+
+  const resolverResultMatch = url.pathname.match(/^\/api\/internal\/reels\/(\d+)\/resolver-result$/);
+  if (resolverResultMatch && request.method === "POST") {
+    if (!validDownloadWorker(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    const result = await receiveResolvedReelMedia(Number(resolverResultMatch[1]), request, env);
+    if ("error" in result) return json({ error: result.error }, { status: result.status });
+    return json(result, { status: "ready" in result ? 201 : 202 });
+  }
 
   if (publishMediaMatch && (request.method === "GET" || request.method === "HEAD")) {
     const reelId = Number(publishMediaMatch[1]);
@@ -1586,7 +2607,52 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     if (!validInboxUser(request, env) && !validAdmin(request, env)) {
       return json({ error: "Não autorizado." }, { status: 401 });
     }
-    return json({ reels: await listReels(env, baseUrl) });
+    const [reels, failedReels] = await Promise.all([
+      listReels(env, baseUrl),
+      listRecentFailedReels(env),
+    ]);
+    return json({ reels, failed_reels: failedReels });
+  }
+
+  const retryReelMatch = url.pathname.match(/^\/api\/reels\/(\d+)\/retry$/);
+  if (retryReelMatch && request.method === "POST") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    const accepted = await retryFailedReel(Number(retryReelMatch[1]), env, ctx);
+    if (!accepted) {
+      return json({ error: "Este Reel não está mais disponível para nova tentativa." }, { status: 409 });
+    }
+    return json({ accepted: true }, { status: 202 });
+  }
+
+  const uploadReelMediaMatch = url.pathname.match(/^\/api\/reels\/(\d+)\/media$/);
+  if (uploadReelMediaMatch && request.method === "POST") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    if (!request.body) return json({ error: "Selecione um arquivo MP4." }, { status: 400 });
+    const declaredSizeHeader = request.headers.get("content-length");
+    const declaredSizeValue = declaredSizeHeader == null ? Number.NaN : Number(declaredSizeHeader);
+    const result = await uploadFailedReelMedia(Number(uploadReelMediaMatch[1]), request.body, {
+      type: (request.headers.get("content-type") || "").split(";")[0].trim().toLowerCase(),
+      name: (request.headers.get("x-upload-filename") || "video.mp4").slice(0, 160),
+      declaredSize: Number.isFinite(declaredSizeValue) ? declaredSizeValue : null,
+    }, request, env);
+    if ("error" in result) return json({ error: result.error }, { status: result.status });
+    return json({ ready: true }, { status: 201 });
+  }
+
+  const deleteReelMatch = url.pathname.match(/^\/api\/reels\/(\d+)$/);
+  if (deleteReelMatch && request.method === "DELETE") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    const result = await archiveReelMedia(Number(deleteReelMatch[1]), env);
+    if (!result.found) return json({ error: "Reel não encontrado." }, { status: 404 });
+    if (result.blocked) {
+      return json({
+        error: "O arquivo ainda está sendo preparado ou publicado. Aguarde a conclusão antes de excluir.",
+      }, { status: 409 });
+    }
+    return json({ deleted: true, metrics_preserved: result.metricsPreserved });
   }
 
   if (url.pathname === "/api/dashboard" && request.method === "GET") {
@@ -1622,6 +2688,17 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       await reschedulePublicationQueue(env, interval);
     }
     return json({ settings: settingsPayload(await studioSettings(env), baseUrl) });
+  }
+
+  if (url.pathname === "/api/instagram/direct/subscribe" && request.method === "POST") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    if (!directConfigured(env)) {
+      return json({
+        error: "Configure o segredo do aplicativo, o token de verificação e o remetente autorizado antes de ativar o Direct.",
+      }, { status: 503 });
+    }
+    return json(await subscribeInstagramDirect(env));
   }
 
   if (url.pathname === "/api/studio-settings/cover" && request.method === "GET") {
@@ -1660,31 +2737,79 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
 
   if (url.pathname === "/api/analytics" && request.method === "GET") {
     if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
-    const data = await analyticsDashboard(env, baseUrl);
-    if (data.sync.refresh_due && metaConnected(env)) {
-      ctx.waitUntil(refreshAllInsights(env));
-    }
-    return json({
-      ...data,
-      sync: {
-        ...data.sync,
-        refreshing: data.sync.refresh_due && metaConnected(env),
-      },
-    });
+    return json(await analyticsDashboard(env, baseUrl));
   }
 
   if (url.pathname === "/api/analytics/refresh" && request.method === "POST") {
     if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
     if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
-    const connection = await youtubeConnection(env);
-    if (!metaConnected(env) && !connection.connected) {
-      return json({ error: "Conecte o Instagram ou o YouTube antes de atualizar métricas." }, { status: 503 });
+    if (!metaConnected(env)) {
+      return json({ error: "Conecte o Instagram antes de atualizar as métricas." }, { status: 503 });
     }
-    ctx.waitUntil(Promise.allSettled([
-      ...(metaConnected(env) ? [refreshAllInsights(env)] : []),
-      ...(connection.connected ? [refreshYouTubeInsights(env)] : []),
-    ]));
-    return json({ accepted: true }, { status: 202 });
+    const accepted = await startInsightRefresh(env, ctx);
+    return json({ accepted, already_running: !accepted }, { status: 202 });
+  }
+
+  if (url.pathname === "/api/shortcut/access" && request.method === "POST") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    const token = newShortcutToken();
+    await env.DB.prepare(`INSERT INTO shortcut_access (id, token_hash, created_at, revoked_at)
+      VALUES (1, ?, CURRENT_TIMESTAMP, NULL)
+      ON CONFLICT(id) DO UPDATE SET token_hash = excluded.token_hash,
+        created_at = CURRENT_TIMESTAMP, last_used_at = NULL, revoked_at = NULL`)
+      .bind(await shortcutTokenHash(token))
+      .run();
+    return json({
+      token,
+      endpoint: `${baseUrl}/api/shortcut/intake`,
+      warning: "Este token é exibido uma única vez. Guarde-o somente no Atalho do iPhone.",
+    });
+  }
+
+  if (url.pathname === "/api/shortcut/access" && request.method === "DELETE") {
+    if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    if (!validWriteOrigin(request)) return json({ error: "Origem inválida." }, { status: 403 });
+    await env.DB.prepare(
+      "UPDATE shortcut_access SET revoked_at = CURRENT_TIMESTAMP WHERE id = 1",
+    ).run();
+    return json({ revoked: true });
+  }
+
+  if (url.pathname === "/api/shortcut/intake" && request.method === "POST") {
+    if (!await validShortcutRequest(request, env)) {
+      return json({ error: "Acesso do Atalho inválido ou revogado." }, { status: 401 });
+    }
+    const data = await request.json().catch(() => ({})) as {
+      url?: string;
+      rightsBasis?: "owned" | "licensed";
+      sourceAccount?: string;
+    };
+    const sourceUrl = findInstagramUrl(data.url);
+    if (!sourceUrl) return json({ error: "O compartilhamento não contém um link válido de Reel." }, { status: 400 });
+    const rightsBasis = data.rightsBasis === "owned" ? "owned" : "licensed";
+    const result = await queueReel({
+      messageId: `shortcut-${crypto.randomUUID()}`,
+      senderId: "ios-shortcut:nelmirjr",
+      sourceUrl,
+      rules: "fixed_cover_caption",
+      sourceAccount: sanitizeText(data.sourceAccount, 80),
+      rightsConfirmed: true,
+      publicationMode: "approval",
+      shareToFeed: true,
+      targets: {
+        instagramEnabled: true,
+        youtubeEnabled: false,
+        rightsBasis,
+        context: "Recebido pelo Atalho privado do iPhone.",
+        madeForKids: false,
+        containsSyntheticMedia: false,
+        paidProductPlacement: false,
+      },
+    }, env, ctx);
+    return json(result, {
+      status: result.accepted ? 202 : result.reason === "duplicate" ? 200 : 400,
+    });
   }
 
   if (url.pathname === "/api/reels/intake" && request.method === "POST") {
@@ -1697,7 +2822,7 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       rightsConfirmed?: boolean;
       publicationMode?: string;
       shareToFeed?: boolean;
-      destinations?: Array<"instagram" | "youtube">;
+      destinations?: Array<"instagram">;
       rightsBasis?: "owned" | "licensed";
       context?: string;
       madeForKids?: boolean;
@@ -1733,16 +2858,31 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     const record = await reelById(Number(publishMatch[1]), env);
     if (!record) return json({ error: "Reel não encontrado." }, { status: 404 });
     if (record.status !== "ready") return json({ error: "O MP4 ainda não está pronto." }, { status: 409 });
-    if (record.publish_status === "published") return json({ error: "Este Reel já foi publicado." }, { status: 409 });
+    const data = await request.json().catch(() => ({})) as {
+      rightsConfirmed?: boolean;
+      destinations?: Array<"instagram">;
+      rightsBasis?: "owned" | "licensed";
+      context?: string;
+      madeForKids?: boolean;
+      containsSyntheticMedia?: boolean;
+      paidProductPlacement?: boolean;
+    };
+    if (Array.isArray(data.destinations)) {
+      const targets = sanitizeTargets(data.destinations, data, []);
+      if (!targets.instagramEnabled) {
+        return json({ error: "Selecione o Instagram." }, { status: 400 });
+      }
+      if (data.rightsConfirmed !== true) {
+        return json({ error: "Confirme os direitos antes de aprovar os destinos." }, { status: 400 });
+      }
+      await createContentTargets(record.id, targets, env);
+    }
+    if (record.publish_status === "published") {
+      return json({ error: "Este Reel já foi publicado no Instagram." }, { status: 409 });
+    }
     if (["creating", "processing", "publishing"].includes(record.publish_status)) {
-      const youtube = await queueYouTubePublication(
-        record.id,
-        record.source_account,
-        Boolean(record.rights_confirmed),
-        env,
-      );
       ctx.waitUntil(publishReel(record, env, baseUrl));
-      return json({ accepted: true, id: record.id, queued: false, youtube }, { status: 202 });
+      return json({ accepted: true, id: record.id, queued: false }, { status: 202 });
     }
     const result = await approveReel(record, env, baseUrl, ctx);
     return json({ accepted: true, id: record.id, ...result }, { status: 202 });
@@ -1759,7 +2899,6 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     return json({
       user: authenticatedEmail(request),
       instagram: metaConnected(env),
-      youtube: await youtubeConnection(env),
       resolver: Boolean(env.REEL_RESOLVER_URL),
       storage: true,
     });
@@ -1774,7 +2913,6 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
         userId: Boolean(env.INSTAGRAM_USER_ID),
         apiVersion: env.INSTAGRAM_API_VERSION || null,
       },
-      youtube: await youtubeConnection(env),
       resolver: Boolean(env.REEL_RESOLVER_URL),
       storage: true,
     });
@@ -1788,7 +2926,7 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       sourceAccount?: string;
       publicationMode?: string;
       shareToFeed?: boolean;
-      destinations?: Array<"instagram" | "youtube">;
+      destinations?: Array<"instagram">;
       rightsBasis?: "owned" | "licensed";
       context?: string;
       madeForKids?: boolean;
@@ -1853,13 +2991,8 @@ const worker = {
     await ensureDatabase(env);
     if (!env.PUBLIC_BASE_URL) return;
     ctx.waitUntil(processPublicationQueue(env, env.PUBLIC_BASE_URL.replace(/\/+$/, "")));
-    ctx.waitUntil(dispatchYouTubeExecutor(env));
     if (new Date(controller.scheduledTime).getUTCMinutes() === 5) {
-      const connection = await youtubeConnection(env);
-      ctx.waitUntil(Promise.allSettled([
-        ...(metaConnected(env) ? [refreshAllInsights(env)] : []),
-        ...(connection.connected ? [refreshYouTubeInsights(env)] : []),
-      ]));
+      if (metaConnected(env)) await startInsightRefresh(env, ctx);
     }
   },
 };

@@ -19,6 +19,10 @@ export interface YouTubeEnv {
   OPENAI_MODERATION_MODEL?: string;
 }
 
+// The YouTube publishing experiment is retired. Historical tables and records
+// remain intact so removing the feature never deletes production data.
+export const YOUTUBE_PUBLISHING_ENABLED = false;
+
 export type YouTubeRequestAuth = {
   userEmail: string;
   validUser: boolean;
@@ -288,6 +292,7 @@ function ownedSourceAccount(sourceAccount: string | null, env: YouTubeEnv) {
 }
 
 export function youtubeConfigured(env: YouTubeEnv) {
+  if (!YOUTUBE_PUBLISHING_ENABLED) return false;
   const executorMode = (env.YOUTUBE_EXECUTOR_MODE || "external").toLowerCase();
   const executorConfigured = executorMode !== "github"
     || Boolean(env.GITHUB_ACTIONS_TOKEN && env.GITHUB_REPOSITORY && env.GITHUB_WORKFLOW_ID);
@@ -301,6 +306,9 @@ export function youtubeConfigured(env: YouTubeEnv) {
 }
 
 export async function dispatchYouTubeExecutor(env: YouTubeEnv) {
+  if (!YOUTUBE_PUBLISHING_ENABLED) {
+    return { dispatched: false, reason: "youtube_publishing_retired" };
+  }
   if ((env.YOUTUBE_EXECUTOR_MODE || "").toLowerCase() !== "github") {
     return { dispatched: false, reason: "executor_not_github" };
   }
@@ -353,6 +361,17 @@ export async function dispatchYouTubeExecutor(env: YouTubeEnv) {
 }
 
 export async function youtubeConnection(env: YouTubeEnv) {
+  if (!YOUTUBE_PUBLISHING_ENABLED) {
+    return {
+      configured: false,
+      connected: false,
+      audited: false,
+      channel_id: null,
+      channel_title: null,
+      scopes: [],
+      connected_at: null,
+    };
+  }
   const row = await env.DB.prepare(
     "SELECT channel_id, channel_title, scopes, updated_at FROM youtube_auth WHERE id = 1",
   ).first<{ channel_id: string; channel_title: string; scopes: string; updated_at: string }>();
@@ -416,6 +435,9 @@ export async function queueYouTubePublication(
   rightsConfirmed: boolean,
   env: YouTubeEnv,
 ) {
+  if (!YOUTUBE_PUBLISHING_ENABLED) {
+    return { requested: false, status: "retired" };
+  }
   const review = await env.DB.prepare(`SELECT youtube_enabled, rights_basis, moderation_status
     FROM content_reviews WHERE reel_id = ?`).bind(reelId).first<{
       youtube_enabled: number;
@@ -1275,7 +1297,8 @@ async function retryPublication(request: Request, reelId: number, env: YouTubeEn
     next_attempt_at = CURRENT_TIMESTAMP, lease_token = NULL, lease_expires_at = NULL,
     upload_session_url = NULL, bytes_uploaded = 0, updated_at = CURRENT_TIMESTAMP
     WHERE reel_id = ?`).bind(reelId).run();
-  return json({ accepted: true });
+  const dispatch = await dispatchYouTubeExecutor(env);
+  return json({ accepted: true, dispatch });
 }
 
 async function updateMetadata(request: Request, reelId: number, env: YouTubeEnv, auth: YouTubeRequestAuth) {
@@ -1458,7 +1481,7 @@ ${candidate}`,
 
 export async function youtubeAnalyticsPayload(env: YouTubeEnv) {
   const { results } = await env.DB.prepare(`SELECT yp.reel_id AS id, yp.video_id,
-    yp.video_url, yp.published_at, r.source_account,
+    yp.video_url, yp.published_at, r.completed_at AS downloaded_at, r.source_account,
     COALESCE(yi.views, 0) AS views, COALESCE(yi.engaged_views, 0) AS engaged_views,
     COALESCE(yi.likes, 0) AS likes, COALESCE(yi.comments, 0) AS comments,
     COALESCE(yi.shares, 0) AS shares, COALESCE(yi.subscribers_gained, 0) AS subscribers_gained,
@@ -1469,6 +1492,11 @@ export async function youtubeAnalyticsPayload(env: YouTubeEnv) {
     LEFT JOIN youtube_insights yi ON yi.reel_id = yp.reel_id
     WHERE yp.status = 'published' AND yp.video_id IS NOT NULL
     ORDER BY views DESC, yp.published_at DESC`).all<Record<string, string | number | null>>();
+  const { results: historyRows } = await env.DB.prepare(`SELECT captured_date,
+    SUM(views) AS views
+    FROM youtube_insight_snapshots
+    GROUP BY captured_date ORDER BY captured_date DESC LIMIT 61`)
+    .all<{ captured_date: string; views: number }>();
   const totals = results.reduce<{
     views: number;
     engagedViews: number;
@@ -1501,7 +1529,98 @@ export async function youtubeAnalyticsPayload(env: YouTubeEnv) {
         ? Number((((totals.likes + totals.comments + totals.shares) / totals.engagedViews) * 100).toFixed(2))
         : 0,
     },
+    periods: youtubeViewPeriods(
+      totals.views,
+      historyRows,
+      results
+        .map((row) => typeof row.published_at === "string" ? row.published_at : null)
+        .filter((value): value is string => Boolean(value))
+        .sort()[0] || null,
+    ),
+    history: historyRows.reverse(),
     shorts: results.map((row, index) => ({ ...row, rank: index + 1 })),
+  };
+}
+
+function youtubeAnalyticsDateKey(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const value = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value || "";
+  return `${value("year")}-${value("month")}-${value("day")}`;
+}
+
+function shiftAnalyticsDate(value: string, days: number) {
+  const date = new Date(`${value}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function youtubeViewPeriods(
+  currentViews: number,
+  history: Array<{ captured_date: string; views: number }>,
+  oldestPublishedAt: string | null,
+) {
+  const today = youtubeAnalyticsDateKey();
+  const byDate = new Map(history.map((row) => [row.captured_date, Number(row.views || 0)]));
+  const cumulative = (date: string) => byDate.has(date) ? byDate.get(date) as number : null;
+  const delta = (end: number | null, start: number | null) =>
+    end == null || start == null ? null : Math.max(0, end - start);
+  const change = (current: number | null, previous: number | null) =>
+    current == null || previous == null || previous <= 0
+      ? null
+      : Number((((current - previous) / previous) * 100).toFixed(1));
+  const yesterday = shiftAnalyticsDate(today, -1);
+  const dayBefore = shiftAnalyticsDate(today, -2);
+  const weekStart = shiftAnalyticsDate(today, -7);
+  const priorWeekStart = shiftAnalyticsDate(today, -14);
+  const monthStart = shiftAnalyticsDate(today, -30);
+  const priorMonthStart = shiftAnalyticsDate(today, -60);
+  const yesterdayViews = delta(cumulative(yesterday), cumulative(dayBefore));
+  const todayViews = delta(currentViews, cumulative(yesterday));
+  const oldestPublishedDate = oldestPublishedAt
+    ? youtubeAnalyticsDateKey(new Date(
+      oldestPublishedAt.includes("T")
+        ? oldestPublishedAt
+        : `${oldestPublishedAt.replace(" ", "T")}Z`,
+    ))
+    : null;
+  const weekBaseline = cumulative(weekStart)
+    ?? (oldestPublishedDate && oldestPublishedDate >= weekStart ? 0 : null);
+  const monthBaseline = cumulative(monthStart)
+    ?? (oldestPublishedDate && oldestPublishedDate >= monthStart ? 0 : null);
+  const weekViews = delta(currentViews, weekBaseline);
+  const previousWeekViews = delta(cumulative(weekStart), cumulative(priorWeekStart));
+  const monthViews = delta(currentViews, monthBaseline);
+  const previousMonthViews = delta(cumulative(monthStart), cumulative(priorMonthStart));
+  return {
+    timezone: "America/Sao_Paulo",
+    as_of: today,
+    today: {
+      views: todayViews,
+      previous_views: yesterdayViews,
+      change_percent: change(todayViews, yesterdayViews),
+      available: todayViews != null,
+    },
+    yesterday: { views: yesterdayViews, available: yesterdayViews != null },
+    week: {
+      views: weekViews,
+      previous_views: previousWeekViews,
+      change_percent: change(weekViews, previousWeekViews),
+      average_per_day: weekViews == null ? null : Math.round(weekViews / 7),
+      available: weekViews != null,
+    },
+    month: {
+      views: monthViews,
+      previous_views: previousMonthViews,
+      change_percent: change(monthViews, previousMonthViews),
+      average_per_day: monthViews == null ? null : Math.round(monthViews / 30),
+      available: monthViews != null,
+    },
   };
 }
 
@@ -1514,7 +1633,7 @@ export async function refreshYouTubeInsights(env: YouTubeEnv) {
       video_id: string;
       published_at: string;
     }>();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = youtubeAnalyticsDateKey();
   let updated = 0;
   for (const row of results) {
     const startDate = (row.published_at || today).slice(0, 10);
@@ -1619,6 +1738,13 @@ export async function handleYouTubeRequest(
   auth: YouTubeRequestAuth,
 ): Promise<Response | null> {
   const url = new URL(request.url);
+  const isRetiredYouTubeRoute = url.pathname.startsWith("/api/youtube/")
+    || url.pathname.startsWith("/api/internal/youtube/")
+    || /^\/api\/reels\/\d+\/youtube\//.test(url.pathname)
+    || url.pathname.startsWith("/worker-media/");
+  if (!YOUTUBE_PUBLISHING_ENABLED && isRetiredYouTubeRoute) {
+    return json({ error: "A publicação no YouTube foi desativada no ReelVolt." }, { status: 410 });
+  }
   const workerMediaMatch = url.pathname.match(/^\/worker-media\/(\d+)\.mp4$/);
   if (workerMediaMatch && (request.method === "GET" || request.method === "HEAD")) {
     return serveWorkerMedia(request, Number(workerMediaMatch[1]), env);
