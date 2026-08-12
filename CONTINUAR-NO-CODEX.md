@@ -61,6 +61,9 @@ da Meta e do resolvedor podem aparecer desconectados localmente.
 - O R2 guarda vídeos e capas.
 - Itens cujo download automático falhar aceitam um MP4 de até 90 MB no próprio
   registro, sem duplicar o Reel nem alterar métricas existentes.
+- Quando o IP fixo do resolvedor principal é recusado pelo Instagram, o
+  workflow privado `reel-downloader.yml` executa o mesmo Cobalt em um runner
+  isolado e devolve o MP4 ao callback autenticado do ReelVolt.
 - O histórico do experimento do YouTube permanece preservado, mas suas rotas,
   interface e executor estão desativados.
 - Notion e Telegram não fazem parte do fluxo.

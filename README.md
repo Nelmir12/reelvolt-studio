@@ -14,8 +14,11 @@ vídeos e as capas.
    privados; no Direct, a assinatura da Meta e o ID vinculado a `@nelmirjr`
    continuam obrigatórios.
 3. O MP4 é obtido diretamente, pelo embed público compatível ou por um
-   resolvedor privado/licenciado. Se o Instagram bloquear todos esses caminhos,
-   o mesmo item aceita o envio manual de um MP4 e fica armazenado uma única vez no R2.
+   resolvedor privado/licenciado. Se o IP do provedor principal for bloqueado,
+   o ReelVolt aciona um executor isolado no GitHub Actions e recebe o MP4 pelo
+   mesmo registro. Se todos os caminhos automáticos forem recusados pelo
+   Instagram, o item ainda aceita o envio manual de um MP4 e fica armazenado
+   uma única vez no R2.
 4. O usuário pode somente baixar o arquivo ou prepará-lo para aprovação. No
    fluxo do Direct, recebe um botão que abre exatamente o Reel preparado.
 5. Após a aprovação explícita, o Reel é publicado pela API oficial da Meta,
@@ -37,6 +40,12 @@ As variáveis estão documentadas em `.env.example`:
 - `INBOX_ALLOWED_EMAILS`: e-mails autorizados, separados por vírgula.
 - `REEL_RESOLVER_URL`, `REEL_RESOLVER_TOKEN` e
   `REEL_RESOLVER_AUTH_SCHEME`: fallback privado/licenciado.
+- `GITHUB_ACTIONS_TOKEN`, `GITHUB_REPOSITORY`,
+  `REEL_DOWNLOAD_WORKFLOW_ID` e `REEL_DOWNLOAD_WORKFLOW_REF`: executor
+  alternativo para bloqueios de IP do resolvedor principal.
+- `REEL_DOWNLOAD_WORKER_SECRET`: autentica o retorno do MP4; durante a
+  migração, o segredo histórico `YOUTUBE_WORKER_SECRET` é aceito somente como
+  credencial interna compatível, sem reativar nenhuma função do YouTube.
 - `INSTAGRAM_GRAPH_HOST`: host oficial da Graph API.
 - `INSTAGRAM_API_VERSION`: versão ativa configurada no aplicativo da Meta.
 - `INSTAGRAM_USER_ID`: ID profissional da conta que receberá os Reels.
@@ -62,6 +71,8 @@ Com Instagram Login, o token precisa das permissões
   registro nem alterar publicações e métricas existentes.
 - `POST /api/reels/:id/media`: recebe um MP4 de até 90 MB para recuperar um
   item cujo download automático falhou, preservando o mesmo registro.
+- `POST /api/internal/reels/:id/resolver-result`: callback autenticado do
+  executor alternativo; recebe o MP4 ou uma falha recuperável.
 - `POST|DELETE /api/shortcut/access`: gera ou revoga o acesso privado do Atalho.
 - `POST /api/shortcut/intake`: recebe a URL do iPhone com um token Bearer cujo
   valor é mostrado uma única vez e armazenado somente como hash no D1.

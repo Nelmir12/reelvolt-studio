@@ -86,13 +86,14 @@ test("server-renders the analytics dashboard tab", async () => {
 });
 
 test("declares the protected Instagram flow and retires YouTube publishing", async () => {
-  const [worker, youtube, readme, manifest, inbox, analytics] = await Promise.all([
+  const [worker, youtube, readme, manifest, inbox, analytics, reelDownloader] = await Promise.all([
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
     readFile(new URL("../worker/youtube.ts", import.meta.url), "utf8"),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
     readFile(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"),
     readFile(new URL("../app/inbox-client.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/analytics-dashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../.github/workflows/reel-downloader.yml", import.meta.url), "utf8"),
   ]);
 
   assert.match(worker, /\/api\/reels\/intake/);
@@ -112,6 +113,11 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(worker, /rightsConfirmed/);
   assert.doesNotMatch(worker, /NOTION_DATABASE_ID|api\.notion\.com/);
   assert.match(worker, /REEL_RESOLVER_AUTH_SCHEME/);
+  assert.match(worker, /dispatchExternalResolver/);
+  assert.match(worker, /receiveResolvedReelMedia/);
+  assert.match(worker, /REEL_DOWNLOAD_WORKER_SECRET/);
+  assert.match(worker, /resolverResultMatch/);
+  assert.match(worker, /resolver-result/);
   assert.match(worker, /result\.picker/);
   assert.match(worker, /downloadMode: "auto"/);
   assert.match(worker, /public_token/);
@@ -201,4 +207,10 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(readme, /instagram_business_manage_messages/);
   assert.match(readme, /X-Hub-Signature-256/);
   assert.match(readme, /Atalho privado do iPhone/);
+  assert.match(readme, /executor isolado/i);
+  assert.match(reelDownloader, /workflow_dispatch/);
+  assert.match(reelDownloader, /ghcr\.io\/nelmir12\/cobalt:latest/);
+  assert.match(reelDownloader, /Content-Type: video\/mp4/);
+  assert.match(reelDownloader, /REEL_DOWNLOAD_WORKER_SECRET/);
+  assert.match(reelDownloader, /YOUTUBE_WORKER_SECRET/);
 });

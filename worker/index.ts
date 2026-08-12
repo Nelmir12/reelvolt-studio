@@ -24,6 +24,9 @@ interface Env extends YouTubeEnv {
   REEL_RESOLVER_URL?: string;
   REEL_RESOLVER_TOKEN?: string;
   REEL_RESOLVER_AUTH_SCHEME?: string;
+  REEL_DOWNLOAD_WORKFLOW_ID?: string;
+  REEL_DOWNLOAD_WORKFLOW_REF?: string;
+  REEL_DOWNLOAD_WORKER_SECRET?: string;
   INSTAGRAM_ACCESS_TOKEN?: string;
   INSTAGRAM_ACCESS_TOKEN_EXPIRES_AT?: string;
   INSTAGRAM_USER_ID?: string;
@@ -746,16 +749,16 @@ async function resolveVideo(sourceUrl: string, env: Env) {
         videoQuality: "max",
       }),
     });
+    const result = await resolver.json().catch(() => ({})) as {
+      status?: string;
+      videoUrl?: string;
+      url?: string;
+      download_url?: string;
+      tunnel?: string[];
+      picker?: Array<{ type?: string; url?: string }>;
+      error?: { code?: string };
+    };
     if (resolver.ok) {
-      const result = await resolver.json() as {
-        status?: string;
-        videoUrl?: string;
-        url?: string;
-        download_url?: string;
-        tunnel?: string[];
-        picker?: Array<{ type?: string; url?: string }>;
-        error?: { code?: string };
-      };
       const pickedVideo = result.picker?.find((item) => item.type === "video" && item.url)?.url;
       const videoUrl = result.videoUrl ?? result.url ?? result.download_url ?? pickedVideo ?? result.tunnel?.[0];
       if (typeof videoUrl === "string") {
@@ -766,11 +769,63 @@ async function resolveVideo(sourceUrl: string, env: Env) {
         resolverFailure = result.error?.code || `resposta ${result.status || "sem arquivo"}`;
       }
     } else {
-      resolverFailure = `HTTP ${resolver.status}`;
+      resolverFailure = result.error?.code
+        ? `${result.error.code} (HTTP ${resolver.status})`
+        : `HTTP ${resolver.status}`;
     }
   }
   if (resolverFailure) throw new Error(`O resolvedor não conseguiu obter este Reel (${resolverFailure}).`);
   throw new Error("O Instagram exige login ou o Reel não está publicamente acessível.");
+}
+
+function externalResolverConfigured(env: Env) {
+  return Boolean(env.GITHUB_ACTIONS_TOKEN && env.GITHUB_REPOSITORY);
+}
+
+async function dispatchExternalResolver(record: ReelRecord, env: Env) {
+  if (!externalResolverConfigured(env)) return false;
+  const workflow = encodeURIComponent(env.REEL_DOWNLOAD_WORKFLOW_ID?.trim() || "reel-downloader.yml");
+  const ref = env.REEL_DOWNLOAD_WORKFLOW_REF?.trim() || "master";
+  const baseUrl = env.PUBLIC_BASE_URL?.replace(/\/+$/, "");
+  if (!baseUrl) return false;
+
+  const response = await fetch(
+    `https://api.github.com/repos/${env.GITHUB_REPOSITORY}/actions/workflows/${workflow}/dispatches`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${env.GITHUB_ACTIONS_TOKEN}`,
+        "content-type": "application/json",
+        "user-agent": "ReelVolt-Studio",
+        "x-github-api-version": "2022-11-28",
+      },
+      body: JSON.stringify({
+        ref,
+        inputs: {
+          reel_id: String(record.id),
+          source_url: record.source_url,
+          callback_url: `${baseUrl}/api/internal/reels/${record.id}/resolver-result`,
+        },
+      }),
+    },
+  );
+  if (!response.ok) {
+    const details = sanitizeText(await response.text(), 300);
+    console.warn(`O executor alternativo recusou o Reel #${record.id} (GitHub ${response.status}).`, details);
+    return false;
+  }
+  await env.DB.prepare(`UPDATE reels SET status = 'downloading', error = NULL,
+    publish_status = CASE WHEN publication_mode = 'download_only' THEN 'not_requested' ELSE 'awaiting_download' END,
+    publish_error = NULL WHERE id = ? AND archived_at IS NULL AND status = 'downloading'`)
+    .bind(record.id)
+    .run();
+  return true;
+}
+
+function validDownloadWorker(request: Request, env: Env) {
+  const secret = env.REEL_DOWNLOAD_WORKER_SECRET || env.YOUTUBE_WORKER_SECRET;
+  return Boolean(secret && request.headers.get("authorization") === `Bearer ${secret}`);
 }
 
 async function graphRequest(
@@ -1477,7 +1532,16 @@ async function processReel(record: ReelRecord, env: Env, baseUrl?: string) {
   try {
     await env.DB.prepare("UPDATE reels SET status = 'downloading', error = NULL WHERE id = ?")
       .bind(record.id).run();
-    const { response } = await resolveVideo(record.source_url, env);
+    let response: Response;
+    try {
+      ({ response } = await resolveVideo(record.source_url, env));
+    } catch (resolutionError) {
+      if (await dispatchExternalResolver(record, env)) {
+        console.info(`O Reel #${record.id} foi encaminhado ao executor alternativo.`);
+        return;
+      }
+      throw resolutionError;
+    }
     const contentType = response.headers.get("content-type")?.split(";")[0] || "video/mp4";
     if (!contentType.startsWith("video/") && contentType !== "application/octet-stream") {
       throw new Error("A origem não retornou um vídeo.");
@@ -1857,6 +1921,80 @@ async function uploadFailedReelMedia(
     await env.VIDEOS.delete(storageKey).catch(() => undefined);
     const message = error instanceof Error ? error.message : "Falha ao armazenar o MP4.";
     await env.DB.prepare("UPDATE reels SET error = ? WHERE id = ? AND status = 'failed'")
+      .bind(message.slice(0, 500), id)
+      .run();
+    return { error: message, status: 500 } as const;
+  }
+}
+
+async function receiveResolvedReelMedia(id: number, request: Request, env: Env) {
+  const record = await env.DB.prepare(`SELECT id, source_url, source_account, rights_confirmed,
+    rules, publication_mode FROM reels
+    WHERE id = ? AND archived_at IS NULL AND status = 'downloading' AND storage_key IS NULL`)
+    .bind(id)
+    .first<Pick<ReelRecord,
+      "id" | "source_url" | "source_account" | "rights_confirmed" | "rules" | "publication_mode"
+    >>();
+  if (!record) return { error: "Este Reel não está aguardando o executor alternativo.", status: 409 } as const;
+
+  const requestType = (request.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+  if (requestType === "application/json") {
+    const data = await request.json().catch(() => ({})) as { error?: string };
+    const detail = sanitizeText(data.error, 180) || "O executor alternativo não conseguiu obter o MP4.";
+    await env.DB.prepare(`UPDATE reels SET status = 'failed', error = ?,
+      publish_status = CASE WHEN publication_mode = 'download_only' THEN 'not_requested' ELSE 'blocked' END
+      WHERE id = ? AND status = 'downloading' AND storage_key IS NULL`)
+      .bind(detail, id)
+      .run();
+    return { failed: true as const };
+  }
+
+  if (!request.body || !["video/mp4", "application/octet-stream"].includes(requestType)) {
+    return { error: "O executor alternativo não enviou um MP4 válido.", status: 415 } as const;
+  }
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > 90 * 1024 * 1024) {
+    return { error: "O MP4 deve ter no máximo 90 MB.", status: 413 } as const;
+  }
+
+  const storageKey = `reels/${record.id}-${crypto.randomUUID()}.mp4`;
+  try {
+    await env.VIDEOS.put(storageKey, request.body, {
+      httpMetadata: { contentType: "video/mp4" },
+      customMetadata: {
+        sourceUrl: record.source_url,
+        sourceAccount: (record.source_account || "").slice(0, 128),
+        rightsConfirmed: String(Boolean(record.rights_confirmed)),
+        rules: (record.rules || "").slice(0, 1024),
+        uploadedBy: "github-actions-resolver",
+      },
+    });
+    const stored = await env.VIDEOS.head(storageKey);
+    if (!stored?.size || stored.size > 90 * 1024 * 1024) {
+      await env.VIDEOS.delete(storageKey);
+      return {
+        error: stored?.size ? "O MP4 deve ter no máximo 90 MB." : "O arquivo recebido está vazio.",
+        status: stored?.size ? 413 : 400,
+      } as const;
+    }
+    const publishStatus = record.publication_mode === "download_only" ? "not_requested" : "awaiting_approval";
+    const updated = await env.DB.prepare(`UPDATE reels SET status = 'ready', storage_key = ?,
+      filename = ?, content_type = 'video/mp4', size_bytes = ?, completed_at = CURRENT_TIMESTAMP,
+      error = NULL, publish_status = ?, publish_error = NULL
+      WHERE id = ? AND status = 'downloading' AND storage_key IS NULL`)
+      .bind(storageKey, `reel-${record.id}.mp4`, stored.size, publishStatus, record.id)
+      .run();
+    if (!updated.meta.changes) {
+      await env.VIDEOS.delete(storageKey);
+      return { error: "Este Reel já foi concluído por outra tentativa.", status: 409 } as const;
+    }
+    return { ready: true as const };
+  } catch (error) {
+    await env.VIDEOS.delete(storageKey).catch(() => undefined);
+    const message = error instanceof Error ? error.message : "Falha ao armazenar o MP4 alternativo.";
+    await env.DB.prepare(`UPDATE reels SET status = 'failed', error = ?,
+      publish_status = CASE WHEN publication_mode = 'download_only' THEN 'not_requested' ELSE 'blocked' END
+      WHERE id = ? AND status = 'downloading' AND storage_key IS NULL`)
       .bind(message.slice(0, 500), id)
       .run();
     return { error: message, status: 500 } as const;
@@ -2428,6 +2566,14 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
 
   if (/^\/(?:api\/youtube|api\/internal\/youtube|api\/reels\/\d+\/youtube|worker-media)\b/.test(url.pathname)) {
     return json({ error: "A publicação no YouTube foi retirada do ReelVolt." }, { status: 410 });
+  }
+
+  const resolverResultMatch = url.pathname.match(/^\/api\/internal\/reels\/(\d+)\/resolver-result$/);
+  if (resolverResultMatch && request.method === "POST") {
+    if (!validDownloadWorker(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
+    const result = await receiveResolvedReelMedia(Number(resolverResultMatch[1]), request, env);
+    if ("error" in result) return json({ error: result.error }, { status: result.status });
+    return json(result, { status: "ready" in result ? 201 : 202 });
   }
 
   if (publishMediaMatch && (request.method === "GET" || request.method === "HEAD")) {
