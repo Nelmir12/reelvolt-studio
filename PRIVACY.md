@@ -4,8 +4,8 @@
 
 O BT Supply ReelVolt é uma ferramenta privada usada para receber links de
 Reels enviados à conta profissional `@btsupply_`, preparar vídeos cujo uso foi
-autorizado e gerenciar a aprovação e a publicação desses conteúdos no
-Instagram.
+autorizado e gerenciar a publicação manual ou pela fila automática ativada pelo
+proprietário no Instagram.
 
 ## Dados tratados
 
@@ -24,10 +24,11 @@ senha do Instagram do usuário remetente.
 Esses dados são usados exclusivamente para:
 
 - validar que a mensagem veio de um usuário autorizado;
-- registrar a confirmação de que há direitos para usar o conteúdo;
+- registrar a autorização permanente de direitos nos canais privados;
 - obter e preparar o vídeo indicado no link;
-- apresentar o conteúdo para aprovação humana;
-- publicar conteúdos aprovados pela API oficial da Meta;
+- apresentar o conteúdo para publicação manual ou para a fila ativada pelo
+  proprietário;
+- publicar conteúdos autorizados pela API oficial da Meta;
 - responder ao usuário e acompanhar falhas, estados e métricas da operação;
 - proteger o serviço contra uso indevido e publicações duplicadas.
 

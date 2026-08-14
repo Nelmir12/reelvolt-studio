@@ -101,19 +101,59 @@ não executam publicação.
 
 ## Desenvolvimento local
 
+Requisitos: Git e Node.js `>=22.13.0`. O repositório usa `package-lock.json` e
+não depende de uma instalação global do Vinext, Vite, Wrangler ou Drizzle.
+
 ```powershell
-copy .env.example .env
+Copy-Item .env.example .env
 npm install
 npm run dev
 ```
 
-Antes de enviar mudanças:
+Os bindings locais do D1 e do R2 são simulados pelo plugin do Cloudflare. Os
+segredos hospedados não são copiados para `.env`; por isso, Meta, Direct e o
+resolvedor podem aparecer desconectados durante o desenvolvimento.
+
+### Comandos disponíveis
+
+| Comando | Uso |
+| --- | --- |
+| `npm run dev` | Inicia o ambiente local Vinext/Vite. |
+| `npm run build` | Compila o site e o worker em `dist/`. |
+| `npm run start` | Serve o build com `vinext start`. |
+| `npm run lint` | Executa o ESLint. |
+| `npm test` | Executa o build e os testes Node em `tests/rendered-html.test.mjs`. |
+| `npm run db:generate` | Gera migrações e metadados Drizzle a partir de `db/schema.ts`. |
+| `git diff --check` | Verifica whitespace inválido e marcadores de conflito. |
+
+Não há comandos dedicados de formatação ou typecheck no `package.json`. O
+TypeScript está em modo `strict`/`noEmit`, e o build faz parte de `npm test`.
+Se o PowerShell bloquear `npm.ps1`, use `npm.cmd` no mesmo comando, como
+`npm.cmd run lint`; não é necessário alterar a política de execução do Windows.
+
+Antes de enviar mudanças de código:
 
 ```powershell
 npm run lint
 npm test
 git diff --check
 ```
+
+Para uma mudança somente documental, `git diff --check` e a revisão do diff são
+o mínimo. Rode lint e testes quando a documentação alterar comandos ou contratos
+verificados pela suíte.
+
+### Arquivos e diretórios
+
+- Edite `app/`, `worker/`, `db/schema.ts`, os assets em `public/` e a
+  documentação conforme o escopo da tarefa.
+- Não edite `node_modules/`, `dist/`, `.vinext/` ou `.wrangler/`; são artefatos
+  locais ignorados.
+- Não edite `drizzle/meta/*.json` manualmente. Use `npm run db:generate`, revise
+  o SQL e crie sempre uma nova migração em vez de mudar uma já aplicada.
+- `.env*` é local e ignorado. Nunca versione segredos.
+- O workflow `.github/workflows/reel-downloader.yml` é acionado apenas por
+  `workflow_dispatch`; ele não é uma suíte geral de CI do repositório.
 
 Para continuar o projeto em outra máquina, consulte
 [`CONTINUAR-NO-CODEX.md`](CONTINUAR-NO-CODEX.md).

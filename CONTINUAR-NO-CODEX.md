@@ -26,10 +26,22 @@ Abra a pasta do repositório e solicite:
 > o R2 e as credenciais. O fluxo operacional é exclusivamente Instagram; não
 > reative o YouTube sem uma nova solicitação explícita.
 
+Antes de alterar qualquer arquivo, peça ao Codex para executar:
+
+```powershell
+git status --short --branch
+git remote -v
+git log --oneline --decorate -8
+```
+
+O `master`, o checkout local e a versão publicada no Sites podem divergir. A
+sessão deve confirmar a baseline efetiva e preservar qualquer modificação ou
+arquivo não rastreado que já esteja na pasta.
+
 ## 3. Desenvolvimento e validação
 
 ```powershell
-copy .env.example .env
+Copy-Item .env.example .env
 npm run dev
 npm run lint
 npm test
@@ -39,6 +51,13 @@ git status
 
 O ambiente local não recebe automaticamente os segredos hospedados. Recursos
 da Meta e do resolvedor podem aparecer desconectados localmente.
+
+Comandos adicionais confirmados: `npm run build`, `npm run start` e
+`npm run db:generate`. Não existem scripts dedicados `format` ou `typecheck`.
+Não edite artefatos locais (`node_modules/`, `dist/`, `.vinext/`, `.wrangler/`)
+nem snapshots `drizzle/meta/*.json` manualmente.
+Se o PowerShell bloquear `npm.ps1`, use o executável `npm.cmd` nos mesmos
+comandos sem alterar a política de execução do Windows.
 
 ## 4. Fluxo de entrega
 
@@ -50,6 +69,11 @@ da Meta e do resolvedor podem aparecer desconectados localmente.
 6. Não clique em publicação nem ative a fila em nome do usuário. O clique manual
    autoriza um Reel; salvar a fila ativa autoriza todos os MP4 elegíveis enquanto
    ela permanecer ativa.
+
+Uma entrega está pronta quando o diff contém apenas os arquivos esperados, as
+verificações aplicáveis passaram (ou o bloqueador e o risco foram registrados),
+a documentação acompanha mudanças de arquitetura/configuração e qualquer
+versão candidata aponta para o mesmo commit enviado ao GitHub.
 
 ## 5. Arquitetura atual
 
@@ -72,6 +96,18 @@ da Meta e do resolvedor podem aparecer desconectados localmente.
 - O histórico do experimento do YouTube permanece preservado, mas suas rotas,
   interface e executor estão desativados.
 - Notion e Telegram não fazem parte do fluxo.
+
+## Pendências conhecidas
+
+- A fila automática apresentou em 14 de agosto de 2026 horários duplicados,
+  intervalo diferente do configurado e inversão entre Reels antigos e novos.
+  Trate a correção como uma tarefa funcional separada, com testes de concorrência,
+  FIFO, inclusão e exclusão; não publique conteúdo real para testar.
+- Não há um comando explícito no repositório para aplicar migrações manualmente.
+  O build empacota `drizzle/` e o worker aplica compatibilidade em
+  `ensureDatabase`; confirme o procedimento do Sites antes de mudar o schema.
+- O workflow do GitHub é um executor alternativo de download, não uma pipeline
+  geral de lint e testes.
 
 ## 6. Segurança
 
