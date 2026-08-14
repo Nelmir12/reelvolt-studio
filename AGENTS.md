@@ -1,5 +1,24 @@
 # Regras do projeto ReelVolt Studio
 
+## Leitura rápida para uma nova sessão
+
+Antes de planejar ou editar:
+
+1. Execute `git status --short --branch`, confirme o branch e rode
+   `git log --oneline --decorate -8`.
+2. Leia este arquivo, `README.md`, `CONTINUAR-NO-CODEX.md` e
+   `.openai/hosting.json`.
+3. Compare o código atual, `origin/master` e a versão realmente publicada no
+   Sites quando a tarefa depender de produção. Um deles pode estar à frente dos
+   demais.
+4. Preserve arquivos modificados ou não rastreados que já estavam no diretório.
+5. Para trabalho complexo, apresente um plano curto antes de editar.
+
+O repositório exige Node.js `>=22.13.0`. Os comandos de verificação oficiais
+são `npm run lint`, `npm test` e `git diff --check`. Não existe atualmente um
+script separado de formatação ou de verificação de tipos; não afirme que um
+deles foi executado.
+
 ## Escopo e autoridade
 
 Este arquivo se aplica a todo o repositório. Leia-o antes de investigar, planejar
@@ -77,6 +96,38 @@ documento histórico representam automaticamente a produção.
 O arquivo `.openai/hosting.json` identifica o projeto Sites existente. Reutilize
 sempre esse projeto e os bindings `DB` e `VIDEOS`; não crie outro site, outro D1
 ou outro bucket R2 por conveniência.
+
+### Mapa do repositório
+
+| Caminho | Responsabilidade |
+| --- | --- |
+| `app/` | Interface React/Next, autenticação e dashboard. |
+| `worker/index.ts` | APIs, webhook, D1/R2, fila, publicação e Insights. |
+| `worker/instagram-embed.ts` | Extração limitada de mídia pública do embed. |
+| `worker/youtube.ts` | Compatibilidade histórica com o experimento retirado; não reative. |
+| `db/schema.ts` | Schema Drizzle de referência. |
+| `drizzle/` | Migrações SQL e metadados versionados. |
+| `tests/rendered-html.test.mjs` | Build e testes de renderização/contratos estáticos. |
+| `.github/workflows/reel-downloader.yml` | Fallback isolado de download acionado por `workflow_dispatch`. |
+| `build/sites-vite-plugin.ts` | Empacota a configuração Sites e as migrações no build. |
+| `.openai/hosting.json` | Identidade do projeto Sites e bindings persistentes. |
+| `.env.example` | Catálogo sem segredos das variáveis esperadas. |
+| `public/` | Manifesto, service worker, ícones, capas e outros assets estáticos. |
+
+### Arquivos gerados, locais e sensíveis
+
+- Não edite `node_modules/`, `dist/`, `.vinext/` ou `.wrangler/`; são artefatos
+  locais ignorados pelo Git.
+- `drizzle/meta/*.json` e novas migrações em `drizzle/*.sql` são gerados por
+  `npm run db:generate`. Não ajuste snapshots manualmente e nunca reescreva uma
+  migração já aplicada.
+- `.env*` é ignorado e pode conter segredos. Use `.env.example` apenas como
+  referência e nunca copie valores hospedados para documentação, logs ou Git.
+- Diretórios locais não rastreados como `.agents/`, `.codex/`, `plugins/` e
+  `.codex-doc-review/` podem pertencer ao usuário ou ao ambiente. Não os inclua,
+  remova ou reorganize sem uma solicitação explícita.
+- `public/reel-cover.jpg` e os demais arquivos de marca são assets do produto,
+  não artefatos descartáveis de build.
 
 ### Convenção de versões
 
@@ -167,18 +218,6 @@ Regras obrigatórias:
 - Não misture reconciliação de branches, migrações antigas e uma funcionalidade
   nova no mesmo commit sem explicar e validar essa necessidade.
 
-### Estado conhecido em 30 de julho de 2026
-
-Na criação deste arquivo, a produção correspondia ao branch remoto
-`origin/agent/metricas-paginacao`, enquanto o checkout local estava em `master`.
-Também existia trabalho local não commitado de métricas por marcos em
-`db/schema.ts` e em arquivos de migração Drizzle.
-
-Esse registro é um alerta de continuidade, não uma verdade permanente.
-Revalide-o antes de agir. Preserve e reconcilie esse trabalho; não o descarte e
-não parta de `master` para mudanças de produção sem verificar qual baseline é a
-mais recente.
-
 ## Padrões de implementação
 
 - A aplicação usa TypeScript, React, Next/Vinext e runtime Cloudflare.
@@ -234,6 +273,27 @@ mais recente.
 
 ## Validação e qualidade
 
+### Comandos confirmados no repositório
+
+| Objetivo | Comando | Observação |
+| --- | --- | --- |
+| Instalar dependências | `npm install` | Usa o `package-lock.json` versionado. |
+| Desenvolvimento local | `npm run dev` | Inicia o Vinext/Vite com bindings locais do Cloudflare. |
+| Build | `npm run build` | Gera `dist/` e empacota `.openai/hosting.json` e `drizzle/`. |
+| Servir o build | `npm run start` | Executa `vinext start`. |
+| Lint | `npm run lint` | Ignora os artefatos configurados. |
+| Testes | `npm test` | Executa o build e depois `node --test tests/rendered-html.test.mjs`. |
+| Gerar migração | `npm run db:generate` | Atualiza SQL e metadados Drizzle; revise tudo antes de commitar. |
+| Integridade do diff | `git diff --check` | Detecta whitespace inválido e marcadores de conflito. |
+
+Não há scripts `format` ou `typecheck` no `package.json`. O `tsconfig.json` usa
+`strict` e `noEmit`, e o build participa da validação do TypeScript, mas isso não
+deve ser descrito como um typecheck isolado.
+
+No Windows, se a política do PowerShell bloquear `npm.ps1`, execute o mesmo
+comando com `npm.cmd` (por exemplo, `npm.cmd test`). Não altere a política de
+execução da máquina apenas para contornar esse bloqueio.
+
 Para mudanças de código, execute antes do push:
 
 ```powershell
@@ -247,11 +307,44 @@ projeto. Adicione ou atualize testes quando alterar comportamento, rotas,
 autenticação, banco, fila, publicação ou métricas.
 
 Para mudanças exclusivamente documentais, `git diff --check` e uma revisão
-contra as fontes de verdade são suficientes.
+contra as fontes de verdade são o mínimo. Rode `npm run lint` e `npm test` se a
+documentação alterar comandos, estrutura esperada ou contratos verificados nos
+testes.
 
 Se uma validação não puder ser executada, informe com precisão qual comando
 faltou, por quê e qual risco permanece. Não declare que algo foi testado ou
 publicado sem evidência.
+
+### Feito quando
+
+Uma tarefa só está concluída quando:
+
+- o resultado pedido foi implementado sem mudanças fora do escopo;
+- contratos afetados entre interface, worker, D1, R2 e provedores permanecem
+  coerentes;
+- testes foram adicionados ou atualizados quando o comportamento mudou;
+- `npm run lint`, `npm test` e `git diff --check` passaram, ou cada verificação
+  não executada foi registrada com motivo e risco;
+- o diff foi revisado e contém apenas arquivos intencionais;
+- documentação e `.env.example` foram atualizados quando arquitetura, comandos,
+  variáveis ou integrações mudaram;
+- o estado foi comunicado separando alteração local, commit, push, versão
+  candidata, implantação e ações externas reais;
+- para produção, a versão candidata corresponde exatamente ao commit enviado e
+  só foi implantada após autorização explícita.
+
+### Problemas e desconhecidos que exigem confirmação
+
+- A aplicação não possui um script explícito para aplicar migrações localmente
+  ou diretamente em produção. O build empacota `drizzle/` e o worker mantém SQL
+  de compatibilidade em `ensureDatabase`; confirme o fluxo do Sites antes de
+  qualquer mudança de schema.
+- Não há formatter configurado nem comando de typecheck independente.
+- Em 14 de agosto de 2026 foi relatado que a fila automática atribuiu o mesmo
+  horário a vários Reels, desrespeitou o intervalo configurado e inverteu a
+  ordem entre itens antigos e novos. Isso permanece uma falha funcional aberta:
+  não considere a fila validada, não publique Reels como teste e investigue
+  concorrência, ordenação FIFO e reagendamento em uma tarefa de código própria.
 
 ## Hospedagem e produção
 
