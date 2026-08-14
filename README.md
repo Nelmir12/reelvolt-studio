@@ -27,6 +27,11 @@ vídeos e as capas.
    a autorização explícita para os itens elegíveis enquanto ela permanecer ativa.
 6. Os Insights oficiais alimentam o dashboard e o histórico de métricas.
 
+Na fila automática, a sequência é FIFO pela data em que o MP4 ficou pronto. Um
+novo Reel é acrescentado depois do último slot reservado; excluir um item ainda
+não iniciado reequilibra os slots restantes. O dashboard é somente leitura e o
+worker impede que dois Reels entrem simultaneamente na etapa de publicação.
+
 O experimento de publicação no YouTube foi retirado. As tabelas e os registros
 históricos permanecem preservados no D1, mas nenhuma nova opção, rota ou
 execução do YouTube fica disponível.

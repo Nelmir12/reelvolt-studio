@@ -193,6 +193,13 @@ mais recente.
   visíveis em uma área compacta de recuperação com erro e nova tentativa.
 - Downloads e publicações devem ser idempotentes sempre que possível. Preserve
   a detecção de duplicatas e impeça publicações duplicadas.
+- A fila automática é FIFO pela data em que o MP4 ficou pronto, com desempate
+  pelo ID. Um item novo sempre entra depois dos itens já programados.
+- Nunca mantenha mais de uma publicação do Instagram ativa. A promoção de
+  `queued` deve usar uma condição atômica que verifique estados ativos.
+- Leituras do dashboard não devem reagendar nem iniciar publicações. Inclusão,
+  mudança explícita de intervalo, exclusão e o cron são os únicos pontos que
+  podem alterar a programação.
 - Não invente métricas indisponíveis. Mostre indisponibilidade ou erro de
   permissão quando a Meta não fornecer um dado.
 - Diferencie claramente constatações oficiais da Meta de hipóteses sobre alcance

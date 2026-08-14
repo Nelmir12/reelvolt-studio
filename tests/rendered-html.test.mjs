@@ -5,6 +5,60 @@ import {
   extractInstagramEmbedVideoUrl,
   instagramEmbedUrl,
 } from "../worker/instagram-embed.ts";
+import {
+  buildPublicationSchedule,
+  nextPublicationStart,
+  oldestPreparedFirst,
+  publicationScheduleNeedsRepair,
+} from "../worker/publication-queue.ts";
+
+test("keeps the automatic publication queue FIFO with the configured interval", () => {
+  const items = [
+    { id: 70, completed_at: "2026-08-14 18:21:13", created_at: "2026-08-14 18:20:22" },
+    { id: 68, completed_at: "2026-08-13 20:07:08", created_at: "2026-08-13 20:06:41" },
+    { id: 63, completed_at: "2026-08-12 15:37:48", created_at: "2026-08-12 15:37:21" },
+  ];
+  assert.deepEqual(oldestPreparedFirst(items).map((item) => item.id), [63, 68, 70]);
+
+  const firstSlot = Date.parse("2026-08-15T12:00:00Z");
+  const schedule = buildPublicationSchedule(items, firstSlot, 240);
+  assert.deepEqual(schedule.map((slot) => slot.id), [63, 68, 70]);
+  assert.equal(schedule[1].scheduledAtMs - schedule[0].scheduledAtMs, 4 * 60 * 60 * 1000);
+  assert.equal(schedule[2].scheduledAtMs - schedule[1].scheduledAtMs, 4 * 60 * 60 * 1000);
+});
+
+test("appends a new Reel after the final reserved slot", () => {
+  const now = Date.parse("2026-08-15T08:00:00Z");
+  const finalReservedSlot = "2026-08-15 20:00:00";
+  assert.equal(
+    nextPublicationStart(now, 240, [finalReservedSlot]),
+    Date.parse("2026-08-16T00:00:00Z"),
+  );
+});
+
+test("repairs only missing, overlapping, or out-of-order publication slots", () => {
+  const baseItems = [
+    { id: 63, completed_at: "2026-08-12 15:37:48", created_at: "2026-08-12 15:37:21" },
+    { id: 68, completed_at: "2026-08-13 20:07:08", created_at: "2026-08-13 20:06:41" },
+    { id: 70, completed_at: "2026-08-14 18:21:13", created_at: "2026-08-14 18:20:22" },
+  ];
+  assert.equal(publicationScheduleNeedsRepair(baseItems.map((item, index) => ({
+    ...item,
+    scheduled_for: [
+      "2026-08-15 12:00:00",
+      "2026-08-15 16:00:00",
+      "2026-08-15 20:00:00",
+    ][index],
+  })), 240), false);
+  assert.equal(publicationScheduleNeedsRepair(baseItems.map((item) => ({
+    ...item,
+    scheduled_for: "2026-08-15 12:00:00",
+  })), 240), true);
+  assert.equal(publicationScheduleNeedsRepair(baseItems.map((item, index) => ({
+    ...item,
+    scheduled_for: index === 1 ? null : "2026-08-15 12:00:00",
+  })), 240), true);
+});
 
 test("extracts the public Instagram embed video URL", () => {
   const contextJSON = JSON.stringify({
@@ -153,6 +207,15 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(worker, /authorizeAutomaticPublicationQueue/);
   assert.match(worker, /automatic_queued/);
   assert.match(worker, /publish_status IN \('awaiting_approval', 'awaiting_setup'\)/);
+  assert.match(worker, /schedulePublicationQueue\(env, settings\.publish_interval_minutes, "append"\)/);
+  assert.match(worker, /repairPublicationQueueIfNeeded\(env, settings\.publish_interval_minutes\)/);
+  assert.match(worker, /NOT EXISTS \(SELECT 1 FROM reels active/);
+  assert.match(worker, /ORDER BY datetime\(COALESCE\(completed_at, created_at\)\), id/);
+  const dashboardRoute = worker.slice(
+    worker.indexOf('url.pathname === "/api/dashboard"'),
+    worker.indexOf('url.pathname === "/api/studio-settings"'),
+  );
+  assert.doesNotMatch(dashboardRoute, /processPublicationQueue|authorizeAutomaticPublicationQueue/);
   assert.match(worker, /publish-cover/);
   assert.match(worker, /PUBLISH_URL_SECRET/);
   assert.match(worker, /\/webhooks\/instagram/);

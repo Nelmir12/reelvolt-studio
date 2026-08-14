@@ -8,6 +8,11 @@ import {
   type YouTubeEnv,
 } from "./youtube";
 import { extractInstagramEmbedVideoUrl, instagramEmbedUrl } from "./instagram-embed";
+import {
+  buildPublicationSchedule,
+  nextPublicationStart,
+  publicationScheduleNeedsRepair,
+} from "./publication-queue";
 
 interface Env extends YouTubeEnv {
   ASSETS: Fetcher;
@@ -1391,11 +1396,17 @@ async function reconcilePublishedReel(record: ReelRecord, env: Env) {
     ? requestedAt - 15 * 60 * 1000
     : Date.now() - 24 * 60 * 60 * 1000;
   const latestMatch = Date.now() + 5 * 60 * 1000;
+  const assigned = await env.DB.prepare(`SELECT instagram_media_id FROM reels
+    WHERE id <> ? AND instagram_media_id IS NOT NULL`)
+    .bind(record.id)
+    .all<{ instagram_media_id: string }>();
+  const assignedMediaIds = new Set(assigned.results.map((row) => row.instagram_media_id));
   const match = (result.data || [])
     .filter((media) => {
       const publishedAt = Date.parse(media.timestamp || "");
       const isVideo = !media.media_type || media.media_type === "VIDEO";
       return isVideo
+        && !assignedMediaIds.has(media.id)
         && (media.caption || "").trim() === expectedCaption
         && Number.isFinite(publishedAt)
         && publishedAt >= earliestMatch
@@ -1408,12 +1419,16 @@ async function reconcilePublishedReel(record: ReelRecord, env: Env) {
     })[0];
   if (!match) return false;
 
-  await env.DB.prepare(`UPDATE reels SET publish_status = 'published', publish_error = NULL,
-    instagram_media_id = ?, instagram_permalink = ?, published_at = COALESCE(published_at, CURRENT_TIMESTAMP)
-    WHERE id = ?`)
-    .bind(match.id, match.permalink || null, record.id)
+  const publishedAt = sqliteTimestamp(Date.parse(match.timestamp || ""));
+  const reconciled = await env.DB.prepare(`UPDATE reels SET publish_status = 'published', publish_error = NULL,
+    instagram_media_id = ?, instagram_permalink = ?, published_at = COALESCE(published_at, ?)
+    WHERE id = ? AND NOT EXISTS (
+      SELECT 1 FROM reels existing
+      WHERE existing.id <> reels.id AND existing.instagram_media_id = ?
+    )`)
+    .bind(match.id, match.permalink || null, publishedAt, record.id, match.id)
     .run();
-  return true;
+  return Boolean(reconciled.meta.changes);
 }
 
 async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
@@ -1433,6 +1448,13 @@ async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
         if (await reconcilePublishedReel(record, env)) return;
       } catch (error) {
         console.warn("A publicação em andamento não pôde ser reconciliada antes da retomada:", error);
+      }
+      const requestedAt = databaseTimestamp(record.publish_requested_at);
+      if (Number.isFinite(requestedAt) && Date.now() - requestedAt < 15 * 60 * 1000) {
+        await env.DB.prepare(
+          "UPDATE reels SET publish_error = ? WHERE id = ? AND publish_status = 'publishing'",
+        ).bind("Aguardando a confirmação da Meta antes de tentar novamente.", record.id).run();
+        return;
       }
     }
 
@@ -1493,9 +1515,9 @@ async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
       return;
     }
 
-    await env.DB.prepare(
-      "UPDATE reels SET publish_status = 'publishing', publish_error = NULL WHERE id = ?",
-    ).bind(record.id).run();
+    await env.DB.prepare(`UPDATE reels SET publish_status = 'publishing', publish_error = NULL,
+      publish_requested_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .bind(record.id).run();
     const published = await graphRequest(
       `${env.INSTAGRAM_USER_ID}/media_publish`,
       env,
@@ -1603,40 +1625,61 @@ async function reelById(id: number, env: Env) {
     FROM reels WHERE id = ?`).bind(id).first<ReelRecord>();
 }
 
-async function nextPublicationTime(env: Env, intervalMinutes: number) {
-  const row = await env.DB.prepare(`SELECT
-    (SELECT MAX(scheduled_for) FROM reels WHERE publish_status = 'queued') AS last_scheduled,
-    (SELECT MAX(published_at) FROM reels WHERE publish_status = 'published') AS last_published`)
-    .first<{ last_scheduled: string | null; last_published: string | null }>();
-  const intervalMs = intervalMinutes * 60 * 1000;
-  const candidates = [
-    databaseTimestamp(row?.last_scheduled || null),
-    databaseTimestamp(row?.last_published || null),
-  ].filter(Number.isFinite);
-  const latest = candidates.length ? Math.max(...candidates) : Number.NaN;
-  return sqliteTimestamp(Number.isFinite(latest) ? Math.max(Date.now(), latest + intervalMs) : Date.now());
+type PublicationQueueRow = {
+  id: number;
+  completed_at: string | null;
+  created_at: string;
+  scheduled_for?: string | null;
+};
+
+async function schedulePublicationQueue(
+  env: Env,
+  intervalMinutes: number,
+  mode: "append" | "rebuild",
+) {
+  const onlyUnscheduled = mode === "append" ? "AND scheduled_for IS NULL" : "";
+  const { results } = await env.DB.prepare(`SELECT id, completed_at, created_at FROM reels
+    WHERE archived_at IS NULL AND status = 'ready' AND publish_status = 'queued'
+      AND approved_at IS NOT NULL ${onlyUnscheduled}`)
+    .all<PublicationQueueRow>();
+  if (!results.length) return 0;
+
+  const references = await env.DB.prepare(`SELECT
+    (SELECT MAX(scheduled_for) FROM reels
+      WHERE archived_at IS NULL AND publish_status = 'queued' AND scheduled_for IS NOT NULL) AS last_scheduled,
+    (SELECT MAX(published_at) FROM reels WHERE publish_status = 'published') AS last_published,
+    (SELECT MAX(COALESCE(publish_requested_at, scheduled_for)) FROM reels
+      WHERE archived_at IS NULL AND publish_status IN ('creating', 'processing', 'publishing')) AS last_active`)
+    .first<{
+      last_scheduled: string | null;
+      last_published: string | null;
+      last_active: string | null;
+    }>();
+  const firstSlot = nextPublicationStart(Date.now(), intervalMinutes, [
+    mode === "append" ? references?.last_scheduled || null : null,
+    references?.last_published || null,
+    references?.last_active || null,
+  ]);
+  const schedule = buildPublicationSchedule(results, firstSlot, intervalMinutes);
+  await env.DB.batch(schedule.map((slot) => env.DB.prepare(`UPDATE reels SET scheduled_for = ?
+    WHERE id = ? AND archived_at IS NULL AND publish_status = 'queued'
+      ${mode === "append" ? "AND scheduled_for IS NULL" : ""}`)
+    .bind(sqliteTimestamp(slot.scheduledAtMs), slot.id)));
+  return schedule.length;
 }
 
 async function reschedulePublicationQueue(env: Env, intervalMinutes: number) {
-  const { results } = await env.DB.prepare(`SELECT id FROM reels
-    WHERE status = 'ready' AND publish_status = 'queued' AND approved_at IS NOT NULL
-    ORDER BY datetime(COALESCE(scheduled_for, approved_at, created_at)), id`).all<{ id: number }>();
-  if (!results.length) return;
-  const last = await env.DB.prepare(
-    "SELECT MAX(published_at) AS last_published FROM reels WHERE publish_status = 'published'",
-  ).first<{ last_published: string | null }>();
-  const lastPublished = databaseTimestamp(last?.last_published || null);
-  const intervalMs = intervalMinutes * 60 * 1000;
-  let cursor = Number.isFinite(lastPublished)
-    ? Math.max(Date.now(), lastPublished + intervalMs)
-    : Date.now();
-  await env.DB.batch(results.map((row) => {
-    const statement = env.DB.prepare(
-      "UPDATE reels SET scheduled_for = ? WHERE id = ? AND publish_status = 'queued'",
-    ).bind(sqliteTimestamp(cursor), row.id);
-    cursor += intervalMs;
-    return statement;
-  }));
+  return schedulePublicationQueue(env, intervalMinutes, "rebuild");
+}
+
+async function repairPublicationQueueIfNeeded(env: Env, intervalMinutes: number) {
+  const { results } = await env.DB.prepare(`SELECT id, completed_at, created_at, scheduled_for FROM reels
+    WHERE archived_at IS NULL AND status = 'ready' AND publish_status = 'queued'
+      AND approved_at IS NOT NULL`)
+    .all<PublicationQueueRow & { scheduled_for: string | null }>();
+  if (!publicationScheduleNeedsRepair(results, intervalMinutes)) return false;
+  await reschedulePublicationQueue(env, intervalMinutes);
+  return true;
 }
 
 async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: ExecutionContext) {
@@ -1669,14 +1712,18 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
   const usesScheduledQueue = Boolean(settings.auto_publish_enabled)
     || record.sender_id.startsWith("instagram:");
   if (usesScheduledQueue) {
-    const scheduledFor = await nextPublicationTime(env, settings.publish_interval_minutes);
     await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
       caption_enabled = ?, cover_mode = ?, cover_key = ?, approved_at = CURRENT_TIMESTAMP,
-      scheduled_for = ?, publish_status = 'queued', publish_error = NULL,
+      scheduled_for = NULL, publish_status = 'queued', publish_error = NULL,
       instagram_container_id = NULL, publish_requested_at = NULL
       WHERE id = ?`)
-      .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, scheduledFor, record.id)
+      .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, record.id)
       .run();
+    await schedulePublicationQueue(env, settings.publish_interval_minutes, "append");
+    const scheduled = await env.DB.prepare(
+      "SELECT scheduled_for FROM reels WHERE id = ? AND publish_status = 'queued'",
+    ).bind(record.id).first<{ scheduled_for: string | null }>();
+    const scheduledFor = scheduled?.scheduled_for || null;
     return { queued: true, scheduledFor };
   }
 
@@ -1695,15 +1742,57 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
 
 async function processPublicationQueue(env: Env, baseUrl: string) {
   if (!metaConnected(env)) return { processed: false };
+  const settings = await studioSettings(env);
+  const activeRows = await env.DB.prepare(`SELECT id FROM reels
+    WHERE archived_at IS NULL AND status = 'ready'
+      AND publish_status IN ('creating', 'processing', 'publishing')
+    ORDER BY datetime(COALESCE(completed_at, created_at)), id`)
+    .all<{ id: number }>();
+  for (const active of activeRows.results) {
+    const activeRecord = await reelById(active.id, env);
+    if (!activeRecord) continue;
+    try {
+      await reconcilePublishedReel(activeRecord, env);
+    } catch (error) {
+      console.warn(`A publicação em andamento do Reel #${active.id} não pôde ser reconciliada.`, error);
+    }
+  }
+
+  const latestPublished = await env.DB.prepare(
+    "SELECT MAX(published_at) AS published_at FROM reels WHERE publish_status = 'published'",
+  ).first<{ published_at: string | null }>();
+  const nextAllowedAt = nextPublicationStart(Date.now(), settings.publish_interval_minutes, [
+    latestPublished?.published_at || null,
+  ]);
+  if (nextAllowedAt > Date.now() + 1000) {
+    return { processed: false, reason: "interval", nextAllowedAt: sqliteTimestamp(nextAllowedAt) };
+  }
+
+  const active = await env.DB.prepare(`SELECT id FROM reels
+    WHERE archived_at IS NULL AND status = 'ready'
+      AND publish_status IN ('creating', 'processing', 'publishing')
+    ORDER BY datetime(COALESCE(completed_at, created_at)), id LIMIT 1`)
+    .first<{ id: number }>();
+  if (active) {
+    const record = await reelById(active.id, env);
+    if (!record) return { processed: false };
+    await publishReel(record, env, baseUrl);
+    return { processed: true, id: active.id, resumed: true };
+  }
+
   const due = await env.DB.prepare(`SELECT id FROM reels
-    WHERE status = 'ready' AND publish_status = 'queued'
+    WHERE archived_at IS NULL AND status = 'ready' AND publish_status = 'queued'
       AND approved_at IS NOT NULL AND scheduled_for IS NOT NULL
       AND datetime(scheduled_for) <= CURRENT_TIMESTAMP
-    ORDER BY datetime(scheduled_for), id LIMIT 1`).first<{ id: number }>();
+    ORDER BY datetime(COALESCE(completed_at, created_at)), id LIMIT 1`).first<{ id: number }>();
   if (!due) return { processed: false };
   const claim = await env.DB.prepare(`UPDATE reels SET publish_status = 'publishing',
     publish_requested_at = COALESCE(publish_requested_at, CURRENT_TIMESTAMP)
-    WHERE id = ? AND publish_status = 'queued'`).bind(due.id).run();
+    WHERE id = ? AND archived_at IS NULL AND status = 'ready' AND publish_status = 'queued'
+      AND NOT EXISTS (SELECT 1 FROM reels active
+        WHERE active.archived_at IS NULL
+          AND active.publish_status IN ('creating', 'processing', 'publishing'))`)
+    .bind(due.id).run();
   if (!claim.meta.changes) return { processed: false };
   const record = await reelById(due.id, env);
   if (!record) return { processed: false };
@@ -1846,7 +1935,8 @@ async function authorizeAutomaticPublicationQueue(env: Env) {
           WHERE content_reviews.reel_id = reels.id AND content_reviews.instagram_enabled = 1))`)
     .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey)
     .run();
-  await reschedulePublicationQueue(env, settings.publish_interval_minutes);
+  await schedulePublicationQueue(env, settings.publish_interval_minutes, "append");
+  await repairPublicationQueueIfNeeded(env, settings.publish_interval_minutes);
   return { enabled: true, queued: Number(claimed.meta.changes || 0) };
 }
 
@@ -2052,18 +2142,43 @@ async function archiveReelMedia(id: number, env: Env) {
   if (record.status !== "ready") {
     return { found: true as const, blocked: true as const, preparing: true as const };
   }
-  if (["queued", "creating", "processing", "publishing"].includes(record.publish_status)) {
+  if (["creating", "processing", "publishing"].includes(record.publish_status)) {
     return { found: true as const, blocked: true as const };
   }
 
-  if (record.storage_key) await env.VIDEOS.delete(record.storage_key);
-  await env.DB.prepare(`UPDATE reels SET archived_at = CURRENT_TIMESTAMP,
+  const archived = await env.DB.prepare(`UPDATE reels SET archived_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND archived_at IS NULL AND status = 'ready'
+      AND publish_status NOT IN ('creating', 'processing', 'publishing')`)
+    .bind(id)
+    .run();
+  if (!archived.meta.changes) {
+    return { found: true as const, blocked: true as const };
+  }
+  try {
+    if (record.storage_key) await env.VIDEOS.delete(record.storage_key);
+  } catch (error) {
+    await env.DB.prepare("UPDATE reels SET archived_at = NULL WHERE id = ? AND storage_key IS NOT NULL")
+      .bind(id)
+      .run();
+    throw error;
+  }
+  await env.DB.prepare(`UPDATE reels SET
     media_deleted_at = CASE WHEN storage_key IS NOT NULL THEN CURRENT_TIMESTAMP ELSE media_deleted_at END,
     storage_key = NULL, filename = NULL, content_type = NULL, size_bytes = NULL,
     public_token = NULL, error = NULL
-    WHERE id = ? AND archived_at IS NULL`)
+    WHERE id = ? AND archived_at IS NOT NULL`)
     .bind(id)
     .run();
+  if (record.publish_status === "queued") {
+    try {
+      const settings = await studioSettings(env);
+      if (settings.auto_publish_enabled) {
+        await reschedulePublicationQueue(env, settings.publish_interval_minutes);
+      }
+    } catch (error) {
+      console.warn("O Reel foi excluído, mas a fila não pôde ser reequilibrada imediatamente.", error);
+    }
+  }
   return {
     found: true as const,
     blocked: false as const,
@@ -2698,12 +2813,6 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
 
   if (url.pathname === "/api/dashboard" && request.method === "GET") {
     if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
-    if (env.PUBLIC_BASE_URL) {
-      ctx.waitUntil((async () => {
-        await tryAuthorizeAutomaticPublicationQueue(env);
-        await processPublicationQueue(env, baseUrl);
-      })());
-    }
     return json(await dashboard(env, baseUrl));
   }
 
@@ -2721,6 +2830,7 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     const coverMode = sanitizeCoverMode(data.coverMode);
     const interval = sanitizeInterval(data.publishIntervalMinutes);
     const autoPublishEnabled = data.autoPublishEnabled === true;
+    const previousSettings = await studioSettings(env);
     await env.DB.prepare(`UPDATE studio_settings SET caption_enabled = ?, default_caption = ?,
       cover_mode = ?, auto_publish_enabled = ?, publish_interval_minutes = ?,
       updated_at = CURRENT_TIMESTAMP WHERE id = 1`)
@@ -2731,6 +2841,10 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     if (autoPublishEnabled) {
       const automaticQueue = await authorizeAutomaticPublicationQueue(env);
       automaticQueued = automaticQueue.queued;
+      if (!previousSettings.auto_publish_enabled
+        || previousSettings.publish_interval_minutes !== interval) {
+        await reschedulePublicationQueue(env, interval);
+      }
     }
     return json({
       settings: settingsPayload(await studioSettings(env), baseUrl),
@@ -2929,7 +3043,17 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       return json({ error: "Este Reel já foi publicado no Instagram." }, { status: 409 });
     }
     if (["creating", "processing", "publishing"].includes(record.publish_status)) {
-      ctx.waitUntil(publishReel(record, env, baseUrl));
+      const oldestActive = await env.DB.prepare(`SELECT id FROM reels
+        WHERE archived_at IS NULL AND status = 'ready'
+          AND publish_status IN ('creating', 'processing', 'publishing')
+        ORDER BY datetime(COALESCE(completed_at, created_at)), id LIMIT 1`)
+        .first<{ id: number }>();
+      if (oldestActive && oldestActive.id !== record.id) {
+        return json({
+          error: `O Reel #${oldestActive.id}, preparado antes, precisa ser concluído primeiro.`,
+        }, { status: 409 });
+      }
+      ctx.waitUntil(processPublicationQueue(env, baseUrl));
       return json({ accepted: true, id: record.id, queued: false }, { status: 202 });
     }
     const result = await approveReel(record, env, baseUrl, ctx);

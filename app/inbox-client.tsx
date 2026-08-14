@@ -964,8 +964,11 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
           <div className="reel-list">
             {visibleReels.map((reel) => {
               const instagramAlreadyPublished = reel.publish_status === "published";
+              const automaticPublicationInProgress = dashboard.settings.auto_publish_enabled
+                && ["creating", "processing", "publishing"].includes(reel.publish_status);
               const canPublish = reel.status === "ready"
                 && !instagramAlreadyPublished
+                && !automaticPublicationInProgress
                 && ["not_requested", "awaiting_approval", "awaiting_setup", "awaiting_metadata", "failed", "processing", "publishing"].includes(reel.publish_status);
               const canApproveAnyDestination = dashboard.settings.meta_connected;
               const instagramState = instagramProgress(reel);
@@ -1004,7 +1007,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                         </div>
                       ) : null}
                     </div>
-                    {reel.scheduled_for ? (
+                    {reel.scheduled_for && reel.publish_status === "queued" ? (
                       <p className="schedule-line">Programado para {formatDate(reel.scheduled_for)}</p>
                     ) : null}
                     {reel.error ? <p className="reel-error">{reel.error}</p> : null}
@@ -1049,7 +1052,7 @@ export default function InboxClient({ userEmail, signOutUrl, sharedText, initial
                         className="action-danger"
                         type="button"
                         onClick={() => void deleteReel(reel)}
-                        disabled={deletingId === reel.id || ["queued", "creating", "processing", "publishing"].includes(reel.publish_status)}
+                        disabled={deletingId === reel.id || ["creating", "processing", "publishing"].includes(reel.publish_status)}
                       >
                         {deletingId === reel.id ? "Excluindo…" : "Excluir arquivo"}
                       </button>
