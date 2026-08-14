@@ -1,7 +1,7 @@
 # BT Supply ReelVolt Studio
 
 Painel privado e instalável para receber links de Reels autorizados, baixar o
-MP4, aprovar publicações e acompanhar os Insights oficiais do Instagram da
+MP4, publicar com um clique ou pela fila automática e acompanhar os Insights oficiais do Instagram da
 conta `@btsupply_`. D1 armazena estados, preferências e métricas; R2 armazena os
 vídeos e as capas.
 
@@ -19,10 +19,12 @@ vídeos e as capas.
    mesmo registro. Se todos os caminhos automáticos forem recusados pelo
    Instagram, o item ainda aceita o envio manual de um MP4 e fica armazenado
    uma única vez no R2.
-4. O usuário pode somente baixar o arquivo ou prepará-lo para aprovação. No
-   fluxo do Direct, recebe um botão que abre exatamente o Reel preparado.
-5. Após a aprovação explícita, o Reel é publicado pela API oficial da Meta,
-   imediatamente ou pela fila configurada.
+4. O usuário pode somente baixar o arquivo ou prepará-lo para publicação. Com a
+   fila desligada, um único botão publica o Reel; com a fila ligada, salvar a
+   configuração autoriza e agenda todos os MP4 prontos e os próximos que forem
+   preparados, em sequência e no intervalo escolhido.
+5. O Reel é publicado exclusivamente pela API oficial da Meta. Ativar a fila é
+   a autorização explícita para os itens elegíveis enquanto ela permanecer ativa.
 6. Os Insights oficiais alimentam o dashboard e o histórico de métricas.
 
 O experimento de publicação no YouTube foi retirado. As tabelas e os registros
@@ -86,7 +88,7 @@ Com Instagram Login, o token precisa das permissões
 - `POST /api/analytics/refresh`: solicita uma leitura exclusiva dos Insights;
   sincronizações sobrepostas são bloqueadas e os Reels são processados com
   concorrência limitada para permanecer dentro do tempo do worker.
-- `POST /api/reels/:id/publish`: aprova, retoma ou repete uma publicação.
+- `POST /api/reels/:id/publish`: inicia, retoma ou repete uma publicação manual.
 - `POST /api/publication-queue/process`: processa um item vencido.
 - `GET /download/:token`: entrega o MP4 ao usuário.
 - `GET /publish-media/:id.mp4`: URL temporária do MP4 para a Meta.
@@ -122,7 +124,9 @@ Para continuar o projeto em outra máquina, consulte
 - Não adicione `.env` ao Git.
 - Não altere o `project_id` em `.openai/hosting.json`.
 - Não remova tabelas do D1 nem objetos do R2 como efeito colateral.
-- Nunca publique um Reel sem aprovação explícita para aquele item.
+- Nunca publique um Reel fora de uma autorização do usuário: o clique no botão
+  autoriza o item manual, e ativar a fila autoriza os MP4 elegíveis enquanto ela
+  permanecer ativa.
 - Falhas de download ficam fora da produção principal, mas aparecem em uma
   área compacta com o erro e uma nova tentativa segura.
 - Nunca aceite um evento do Direct sem assinatura HMAC válida; o primeiro
@@ -134,7 +138,7 @@ Para continuar o projeto em outra máquina, consulte
 O webhook aceita os tipos de compartilhamento que a Meta pode enviar para um
 post ou Reel (`share`, `media`, `video`, `ig_reel` e `reel`). Para `@nelmirjr`,
 a autorização permanente já registrada prepara o MP4 sem outra resposta e o
-Direct devolve o botão de aprovação no ReelVolt.
+Direct devolve um botão que abre o item exato no ReelVolt.
 
 Para uso restrito às próprias contas, mantenha `@nelmirjr` e `@btsupply_` como
 contas de teste/funções do aplicativo e conceda
@@ -142,5 +146,5 @@ contas de teste/funções do aplicativo e conceda
 destinado a usuários externos. Enquanto o aplicativo não estiver publicado e o
 callback não estiver liberado pela Meta, o Direct não entrega eventos reais. A
 alternativa gratuita é o Atalho privado do iPhone: ele envia a URL diretamente
-ao ReelVolt e prepara o MP4. Em todos os canais, cada publicação ainda exige a
-aprovação final daquele Reel no painel.
+ao ReelVolt e prepara o MP4. Com a fila desligada, cada item exige um clique;
+com a fila ligada, os itens preparados entram automaticamente na programação.

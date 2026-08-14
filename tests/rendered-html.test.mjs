@@ -150,6 +150,9 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(worker, /studio_settings/);
   assert.match(worker, /scheduled_for/);
   assert.match(worker, /processPublicationQueue/);
+  assert.match(worker, /authorizeAutomaticPublicationQueue/);
+  assert.match(worker, /automatic_queued/);
+  assert.match(worker, /publish_status IN \('awaiting_approval', 'awaiting_setup'\)/);
   assert.match(worker, /publish-cover/);
   assert.match(worker, /PUBLISH_URL_SECRET/);
   assert.match(worker, /\/webhooks\/instagram/);
@@ -179,12 +182,13 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(manifest, /"display": "standalone"/);
   assert.match(inbox, /const REELS_PER_PAGE = 6/);
   assert.match(inbox, /visibleReels\.map/);
-  assert.match(inbox, /Aprovar para a fila/);
-  assert.match(inbox, /Autorizar publicação/);
+  assert.match(inbox, /Publicar no Instagram/);
+  assert.match(inbox, /todos os MP4 prontos e os próximos serão publicados em sequência/);
   assert.match(inbox, /Recebido pelo Direct/);
   assert.match(inbox, /Atalho do iPhone/);
-  assert.match(inbox, /Autorização permanente registrada/);
-  assert.match(inbox, /APROVAÇÃO DO INSTAGRAM/);
+  assert.match(inbox, /Autorização permanente ativa/);
+  assert.doesNotMatch(inbox, /APROVAÇÃO DO INSTAGRAM|approvalDraft|approval-overlay/);
+  assert.doesNotMatch(inbox, /Base dos direitos|Conteúdo infantil|Mídia sintética realista|Promoção paga/);
   assert.match(inbox, /MP4 pronto/);
   assert.match(inbox, /Publicado no Instagram/);
   assert.match(inbox, /Excluir arquivo/);
@@ -213,4 +217,8 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(reelDownloader, /Content-Type: video\/mp4/);
   assert.match(reelDownloader, /REEL_DOWNLOAD_WORKER_SECRET/);
   assert.match(reelDownloader, /YOUTUBE_WORKER_SECRET/);
+  assert.match(reelDownloader, /continue-on-error: true/);
+  assert.match(reelDownloader, /steps\.resolve\.outcome == 'success'/);
+  assert.match(reelDownloader, /steps\.resolve\.outcome == 'failure'/);
+  assert.doesNotMatch(reelDownloader, /if: failure\(\)/);
 });
