@@ -47,14 +47,17 @@ da Meta e do resolvedor podem aparecer desconectados localmente.
 3. Faça push do estado exato validado.
 4. Prepare uma versão candidata no projeto Sites existente.
 5. Solicite autorização explícita antes de implantar em produção.
-6. Solicite autorização separada antes de publicar cada Reel real.
+6. Não clique em publicação nem ative a fila em nome do usuário. O clique manual
+   autoriza um Reel; salvar a fila ativa autoriza todos os MP4 elegíveis enquanto
+   ela permanecer ativa.
 
 ## 5. Arquitetura atual
 
 - O fluxo operacional publica somente no Instagram pela API oficial da Meta.
 - A autorização permanente de direitos vale para entradas privadas do painel,
-  do Atalho do iPhone e do Direct autenticado de `@nelmirjr`; a autorização
-  final de publicação continua individual no ReelVolt.
+  do Atalho do iPhone e do Direct autenticado de `@nelmirjr`. Com a fila
+  desligada, a publicação é autorizada por um único clique no item; com a fila
+  ligada, todos os MP4 prontos e futuros entram automaticamente na programação.
 - O Direct depende de o aplicativo e o webhook serem liberados pela Meta. Até
   isso ocorrer, o Atalho privado do iPhone é a entrada automática recomendada.
 - O D1 guarda estados, preferências e Insights.
@@ -63,7 +66,9 @@ da Meta e do resolvedor podem aparecer desconectados localmente.
   registro, sem duplicar o Reel nem alterar métricas existentes.
 - Quando o IP fixo do resolvedor principal é recusado pelo Instagram, o
   workflow privado `reel-downloader.yml` executa o mesmo Cobalt em um runner
-  isolado e devolve o MP4 ao callback autenticado do ReelVolt.
+  isolado e devolve o MP4 ao callback autenticado do ReelVolt. Recusas
+  recuperáveis são informadas ao ReelVolt sem marcar o workflow como falho;
+  erros reais de infraestrutura continuam falhando e gerando alerta.
 - O histórico do experimento do YouTube permanece preservado, mas suas rotas,
   interface e executor estão desativados.
 - Notion e Telegram não fazem parte do fluxo.

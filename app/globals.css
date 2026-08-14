@@ -330,38 +330,6 @@ select:focus-visible {
   font-weight: 800;
 }
 
-.destination-picker {
-  display: grid;
-  gap: 0.65rem;
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  padding: 0.9rem;
-  grid-column: 1 / -1;
-}
-
-.destination-picker legend {
-  padding: 0 0.35rem;
-  font-weight: 800;
-}
-
-.destination-picker label,
-.content-flags label {
-  display: flex;
-  flex-direction: row;
-  align-items: flex-start;
-  gap: 0.65rem;
-}
-
-.destination-picker label span {
-  display: grid;
-  gap: 0.12rem;
-}
-
-.destination-picker small {
-  color: var(--muted);
-  font-weight: 500;
-}
-
 .shortcut-setup {
   display: grid;
   gap: 14px;
@@ -424,22 +392,6 @@ select:focus-visible {
 
 .instagram-destination-note small {
   color: var(--muted);
-}
-
-.content-flags {
-  display: grid;
-  gap: 0.55rem;
-  padding: 0.2rem 0;
-  grid-column: 1 / -1;
-}
-
-.destination-picker input,
-.content-flags input {
-  flex: 0 0 auto;
-  width: 17px;
-  height: 17px;
-  margin: 0;
-  accent-color: var(--accent);
 }
 
 .publishing-guide {
@@ -533,7 +485,6 @@ select:focus-visible {
 }
 
 .intake-panel .section-heading,
-.intake-panel .rights-check,
 .intake-panel .primary-button,
 .intake-panel label:first-of-type {
   grid-column: 1 / -1;
@@ -567,7 +518,7 @@ select:focus-visible {
   line-height: 1.45;
 }
 
-.intake-panel label:not(.rights-check) {
+.intake-panel label {
   display: grid;
   gap: 7px;
   align-content: start;
@@ -625,33 +576,6 @@ select:focus-visible {
   min-height: 28px;
   margin: -1px 0 0 !important;
   line-height: 1.45;
-}
-
-.rights-check {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 10px;
-  line-height: 1.45;
-}
-
-.rights-check input {
-  flex: 0 0 auto;
-  width: 17px;
-  height: 17px;
-  margin: 0;
-  accent-color: var(--accent);
-}
-
-.direct-rights-confirmed {
-  border: 1px solid color-mix(in srgb, var(--success) 35%, var(--line));
-  border-radius: 10px;
-  padding: 12px;
-  background: var(--success-soft);
-  color: var(--text);
-  cursor: default;
 }
 
 .primary-button,
@@ -1292,101 +1216,6 @@ select:focus-visible {
   opacity: .45;
 }
 
-.approval-overlay {
-  position: fixed;
-  z-index: 50;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  overflow-y: auto;
-  padding: 24px;
-  background: rgba(20, 24, 31, .52);
-  backdrop-filter: blur(5px);
-}
-
-.approval-dialog {
-  display: grid;
-  width: min(620px, 100%);
-  max-height: calc(100vh - 48px);
-  overflow-y: auto;
-  gap: 16px;
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 22px;
-  background: var(--surface);
-  box-shadow: 0 24px 80px rgba(18, 24, 36, .24);
-}
-
-.approval-dialog > label {
-  display: grid;
-  gap: 7px;
-  color: var(--ink-soft);
-  font-size: 9px;
-  font-weight: 650;
-}
-
-.approval-dialog select,
-.approval-dialog textarea {
-  width: 100%;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  padding: 10px;
-  background: var(--surface);
-  color: var(--ink);
-  font: inherit;
-}
-
-.approval-dialog-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 20px;
-}
-
-.approval-dialog-heading span {
-  color: var(--accent);
-  font-size: 8px;
-  font-weight: 720;
-  letter-spacing: .08em;
-}
-
-.approval-dialog-heading h2 {
-  margin: 5px 0 4px;
-  font-size: 24px;
-  letter-spacing: -.04em;
-}
-
-.approval-dialog-heading p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 9px;
-  line-height: 1.5;
-}
-
-.approval-dialog-heading > button {
-  width: 34px;
-  height: 34px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-subtle);
-  color: var(--muted);
-  font-size: 20px;
-}
-
-.approval-actions {
-  display: grid;
-  grid-template-columns: 1fr 1.6fr;
-  gap: 10px;
-  padding-top: 4px;
-}
-
-.approval-actions .action-secondary {
-  min-height: 40px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-}
-
 .processing-label {
   color: var(--muted);
   font-size: 9px;
@@ -1945,7 +1774,6 @@ select:focus-visible {
 
   .intake-panel label,
   .intake-panel .section-heading,
-  .intake-panel .rights-check,
   .intake-panel .primary-button {
     grid-column: 1;
   }

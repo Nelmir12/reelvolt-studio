@@ -1566,8 +1566,9 @@ async function processReel(record: ReelRecord, env: Env, baseUrl?: string) {
       WHERE id = ?`)
       .bind(storageKey, `reel-${record.id}.mp4`, "video/mp4", stored?.size ?? null, publishStatus, record.id)
       .run();
+    const automaticQueue = await tryAuthorizeAutomaticPublicationQueue(env);
     const senderId = directSenderId(record);
-    if (senderId && baseUrl) {
+    if (senderId && baseUrl && !automaticQueue.enabled) {
       try {
         await sendDirectApprovalButton(senderId, record.id, baseUrl, env);
       } catch (notificationError) {
@@ -1827,6 +1828,37 @@ async function listReels(env: Env, baseUrl: string) {
   }));
 }
 
+async function authorizeAutomaticPublicationQueue(env: Env) {
+  const settings = await studioSettings(env);
+  if (!settings.auto_publish_enabled) return { enabled: false, queued: 0 };
+  if (!metaConnected(env)) return { enabled: true, queued: 0 };
+
+  const caption = settings.caption_enabled ? settings.default_caption.trim() : "";
+  const coverKey = settings.cover_mode === "fixed" ? settings.fixed_cover_key : null;
+  const claimed = await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
+    caption_enabled = ?, cover_mode = ?, cover_key = ?, approved_at = COALESCE(approved_at, CURRENT_TIMESTAMP),
+    scheduled_for = NULL, publish_status = 'queued', publish_error = NULL,
+    instagram_container_id = NULL, publish_requested_at = NULL
+    WHERE archived_at IS NULL AND status = 'ready' AND publication_mode <> 'download_only'
+      AND publish_status IN ('awaiting_approval', 'awaiting_setup')
+      AND (NOT EXISTS (SELECT 1 FROM content_reviews WHERE content_reviews.reel_id = reels.id)
+        OR EXISTS (SELECT 1 FROM content_reviews
+          WHERE content_reviews.reel_id = reels.id AND content_reviews.instagram_enabled = 1))`)
+    .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey)
+    .run();
+  await reschedulePublicationQueue(env, settings.publish_interval_minutes);
+  return { enabled: true, queued: Number(claimed.meta.changes || 0) };
+}
+
+async function tryAuthorizeAutomaticPublicationQueue(env: Env) {
+  try {
+    return await authorizeAutomaticPublicationQueue(env);
+  } catch (error) {
+    console.warn("A fila automática não pôde ser atualizada; o MP4 permanece pronto.", error);
+    return { enabled: false, queued: 0 };
+  }
+}
+
 async function listRecentFailedReels(env: Env) {
   const { results } = await env.DB.prepare(`SELECT id, source_url, source_account, status, error,
     publication_mode, publish_status, created_at
@@ -1916,6 +1948,7 @@ async function uploadFailedReelMedia(
       await env.VIDEOS.delete(storageKey);
       return { error: "Este Reel já está sendo processado.", status: 409 } as const;
     }
+    await tryAuthorizeAutomaticPublicationQueue(env);
     return { ready: true as const };
   } catch (error) {
     await env.VIDEOS.delete(storageKey).catch(() => undefined);
@@ -1988,6 +2021,7 @@ async function receiveResolvedReelMedia(id: number, request: Request, env: Env) 
       await env.VIDEOS.delete(storageKey);
       return { error: "Este Reel já foi concluído por outra tentativa.", status: 409 } as const;
     }
+    await tryAuthorizeAutomaticPublicationQueue(env);
     return { ready: true as const };
   } catch (error) {
     await env.VIDEOS.delete(storageKey).catch(() => undefined);
@@ -2386,7 +2420,14 @@ async function receiveDirectReel(
     .bind(sourceUrl).first<{ id: number; status: string }>();
   if (existing) {
     if (existing.status === "ready") {
-      await sendDirectApprovalButton(senderId, existing.id, baseUrl, env);
+      const automaticQueue = await tryAuthorizeAutomaticPublicationQueue(env);
+      if (automaticQueue.enabled) {
+        await sendInstagramDirectMessage(senderId, {
+          text: `Esse Reel já está registrado como #${existing.id} e está na fila automática do ReelVolt.`,
+        }, env);
+      } else {
+        await sendDirectApprovalButton(senderId, existing.id, baseUrl, env);
+      }
     } else if (existing.status === "awaiting_rights") {
       await requestDirectRights(senderId, existing.id, env);
     } else {
@@ -2657,7 +2698,12 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
 
   if (url.pathname === "/api/dashboard" && request.method === "GET") {
     if (!validInboxUser(request, env)) return json({ error: "Não autorizado." }, { status: 401 });
-    if (env.PUBLIC_BASE_URL) ctx.waitUntil(processPublicationQueue(env, baseUrl));
+    if (env.PUBLIC_BASE_URL) {
+      ctx.waitUntil((async () => {
+        await tryAuthorizeAutomaticPublicationQueue(env);
+        await processPublicationQueue(env, baseUrl);
+      })());
+    }
     return json(await dashboard(env, baseUrl));
   }
 
@@ -2674,7 +2720,6 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
     const caption = typeof data.caption === "string" ? data.caption.trim().slice(0, 2200) : "";
     const coverMode = sanitizeCoverMode(data.coverMode);
     const interval = sanitizeInterval(data.publishIntervalMinutes);
-    const previous = await studioSettings(env);
     const autoPublishEnabled = data.autoPublishEnabled === true;
     await env.DB.prepare(`UPDATE studio_settings SET caption_enabled = ?, default_caption = ?,
       cover_mode = ?, auto_publish_enabled = ?, publish_interval_minutes = ?,
@@ -2682,12 +2727,15 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       .bind(data.captionEnabled === false ? 0 : 1, caption, coverMode,
         autoPublishEnabled ? 1 : 0, interval)
       .run();
-    if (autoPublishEnabled && (
-      !previous.auto_publish_enabled || previous.publish_interval_minutes !== interval
-    )) {
-      await reschedulePublicationQueue(env, interval);
+    let automaticQueued = 0;
+    if (autoPublishEnabled) {
+      const automaticQueue = await authorizeAutomaticPublicationQueue(env);
+      automaticQueued = automaticQueue.queued;
     }
-    return json({ settings: settingsPayload(await studioSettings(env), baseUrl) });
+    return json({
+      settings: settingsPayload(await studioSettings(env), baseUrl),
+      automatic_queued: automaticQueued,
+    });
   }
 
   if (url.pathname === "/api/instagram/direct/subscribe" && request.method === "POST") {
@@ -2990,7 +3038,10 @@ const worker = {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     await ensureDatabase(env);
     if (!env.PUBLIC_BASE_URL) return;
-    ctx.waitUntil(processPublicationQueue(env, env.PUBLIC_BASE_URL.replace(/\/+$/, "")));
+    ctx.waitUntil((async () => {
+      await tryAuthorizeAutomaticPublicationQueue(env);
+      await processPublicationQueue(env, env.PUBLIC_BASE_URL.replace(/\/+$/, ""));
+    })());
     if (new Date(controller.scheduledTime).getUTCMinutes() === 5) {
       if (metaConnected(env)) await startInsightRefresh(env, ctx);
     }

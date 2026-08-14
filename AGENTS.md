@@ -18,7 +18,7 @@ ou alterar o projeto.
 ## Objetivo e arquitetura oficial
 
 O ReelVolt Studio é uma PWA privada para receber links de Reels autorizados,
-baixar os vídeos em MP4, gerenciar aprovação e publicação no Instagram e
+baixar os vídeos em MP4, gerenciar publicação manual ou automática no Instagram e
 consultar Insights da conta `@btsupply_`.
 
 O fluxo operacional atual é:
@@ -36,10 +36,11 @@ O fluxo operacional atual é:
    mesmo registro aceita um upload manual sem alterar métricas ou aprovações.
 4. O MP4 é armazenado no R2, enquanto estados, preferências, identificadores e
    métricas ficam no D1.
-5. Reels destinados à publicação aguardam aprovação humana. No fluxo do Direct,
-   a confirmação de direitos prepara o MP4 e um botão abre o item exato no
-   ReelVolt; somente o botão final do painel autoriza a publicação daquele Reel.
-6. Após a aprovação, o Instagram usa exclusivamente a API oficial da Meta.
+5. Com a fila desligada, um único clique no item pronto autoriza sua publicação.
+   Com a fila ligada, salvar a configuração autoriza todos os MP4 elegíveis já
+   prontos e os próximos preparados, que são agendados em sequência no intervalo
+   escolhido. No fluxo do Direct, o botão abre o item exato no ReelVolt.
+6. O Instagram usa exclusivamente a API oficial da Meta para publicar.
 7. Insights oficiais do Instagram alimentam o dashboard e o histórico.
 
 O experimento de publicação no YouTube foi retirado. Preserve suas tabelas,
@@ -48,12 +49,13 @@ executores ou métricas do YouTube sem uma nova solicitação explícita do usu�
 
 Notion e Telegram não fazem parte do fluxo operacional atual. O Direct do
 Instagram foi reativado exclusivamente como entrada autenticada para
-`@nelmirjr`; ele não substitui a aprovação individual no ReelVolt.
+`@nelmirjr`; ele não altera o modo manual ou automático escolhido no ReelVolt.
 
 Em 10 de agosto de 2026, o usuário concedeu autorização permanente para
 baixar, editar e preparar todo conteúdo enviado por ele pelos canais privados
-autenticados do ReelVolt. Essa autorização elimina confirmações repetidas de
-direitos, mas não elimina a aprovação final individual de publicação. O
+autenticados do ReelVolt. Em 14 de agosto de 2026, também autorizou a remoção
+das confirmações repetidas de publicação: o clique manual autoriza um item e a
+ativação da fila autoriza todos os itens elegíveis enquanto estiver ativa. O
 Direct ainda depende da publicação do aplicativo e da liberação do webhook
 pela Meta; até isso ocorrer, use o Atalho privado do iPhone.
 
@@ -89,8 +91,8 @@ ou outro bucket R2 por conveniência.
 ## Segurança, direitos e uso aceitável
 
 - Aceite somente vídeos próprios, licenciados ou autorizados pelo titular.
-- Preserve o registro da autorização permanente nos canais privados e a
-  aprovação final explícita de cada publicação.
+- Preserve o registro da autorização permanente nos canais privados e o modo
+  de autorização escolhido: clique manual no item ou fila automática ativa.
 - Não contorne contas privadas, autenticação, bloqueios de acesso ou medidas de
   proteção do Instagram.
 - Não automatize sites ou APIs cujos termos proíbam bots, scraping ou downloads
@@ -124,8 +126,8 @@ O agente pode, sem confirmação adicional:
 É obrigatória uma autorização explícita do usuário antes de:
 
 - implantar ou promover uma versão no endereço de produção;
-- clicar em aprovação, chamar uma rota de publicação ou publicar um Reel real;
-- aprovar em nome do usuário um item que entrará na fila automática;
+- clicar no botão de publicação, ativar a fila, chamar uma rota de publicação
+  ou publicar um Reel real em nome do usuário;
 - contratar um serviço, ativar plano pago ou realizar ação que possa gerar
   cobrança;
 - apagar, substituir ou recriar dados, tabelas, objetos R2, bindings, tokens,
@@ -134,12 +136,12 @@ O agente pode, sem confirmação adicional:
 - tornar público um recurso atualmente privado;
 - reduzir ou remover qualquer trava desta seção.
 
-A fila automática pode publicar no Instagram sem uma nova intervenção somente quando o Reel
-já tiver sido aprovado explicitamente pelo usuário. A aprovação feita no painel
-é autorização para aquele Reel; ela não autoriza outros itens. Uma autorização
-para implantar o site também não autoriza publicar conteúdo no Instagram, e
-vice-versa. Não reative aprovações ou uploads multicanal enquanto o experimento
-do YouTube estiver retirado.
+A fila automática pode publicar no Instagram sem nova intervenção porque sua
+ativação pelo usuário é autorização explícita para todos os MP4 elegíveis já
+prontos e os próximos preparados enquanto ela permanecer ativa. Com a fila
+desligada, o clique no item autoriza somente aquele Reel. Uma autorização para
+implantar o site não autoriza conteúdo nem ativa a fila, e vice-versa. Não
+reative uploads multicanal enquanto o experimento do YouTube estiver retirado.
 
 ## Git e preservação do trabalho
 
@@ -213,13 +215,13 @@ mais recente.
 
 - A interface deve ser responsiva, acessível e priorizar português do Brasil.
 - O uso principal no iPhone deve permanecer simples e instalável como PWA.
-- O modo padrão é preparar o MP4 e aguardar aprovação; “somente baixar” deve
+- O modo padrão é preparar o MP4 para publicação; “somente baixar” deve
   continuar disponível.
-- Não reintroduza publicação imediata sem aprovação humana.
+- Não publique sem o clique manual do usuário ou sem a fila automática ativa.
 - Preferências de legenda, capa e intervalo pertencem ao produto e não devem ser
   congeladas neste arquivo.
-- Mudanças globais de preferências não devem alterar silenciosamente Reels já
-  aprovados.
+- Alterações de legenda, capa ou intervalo não devem modificar silenciosamente
+  Reels já programados ou publicados.
 - Preserve informações claras de status, erro, agendamento e resultado da
   publicação.
 - Exiba separadamente datas de recebimento/download e de publicação no

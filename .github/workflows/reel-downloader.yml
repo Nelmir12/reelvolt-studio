@@ -44,6 +44,8 @@ jobs:
           exit 1
 
       - name: Resolve and download MP4
+        id: resolve
+        continue-on-error: true
         env:
           SOURCE_URL: ${{ inputs.source_url }}
         run: |
@@ -64,6 +66,7 @@ jobs:
           test "$(stat --format=%s reel.mp4)" -le 94371840
 
       - name: Return MP4 to ReelVolt
+        if: steps.resolve.outcome == 'success'
         env:
           CALLBACK_URL: ${{ inputs.callback_url }}
           PRIMARY_WORKER_SECRET: ${{ secrets.REEL_DOWNLOAD_WORKER_SECRET }}
@@ -78,18 +81,17 @@ jobs:
             --data-binary @reel.mp4 "$CALLBACK_URL"
 
       - name: Report a recoverable failure
-        if: failure()
+        if: steps.resolve.outcome == 'failure'
         env:
           CALLBACK_URL: ${{ inputs.callback_url }}
           PRIMARY_WORKER_SECRET: ${{ secrets.REEL_DOWNLOAD_WORKER_SECRET }}
           LEGACY_WORKER_SECRET: ${{ secrets.YOUTUBE_WORKER_SECRET }}
         run: |
           WORKER_SECRET="${PRIMARY_WORKER_SECRET:-$LEGACY_WORKER_SECRET}"
-          if [[ -n "$WORKER_SECRET" ]]; then
-            curl --silent --show-error \
-              --request POST \
-              --header "Authorization: Bearer $WORKER_SECRET" \
-              --header 'Content-Type: application/json' \
-              --data '{"error":"O executor alternativo também foi bloqueado pelo Instagram. Tente novamente mais tarde."}' \
-              "$CALLBACK_URL" || true
-          fi
+          test -n "$WORKER_SECRET"
+          curl --fail-with-body --silent --show-error --retry 3 --retry-all-errors \
+            --request POST \
+            --header "Authorization: Bearer $WORKER_SECRET" \
+            --header 'Content-Type: application/json' \
+            --data '{"error":"O executor alternativo também foi bloqueado pelo Instagram. Tente novamente mais tarde."}' \
+            "$CALLBACK_URL"
