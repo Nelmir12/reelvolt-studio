@@ -209,6 +209,7 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.match(worker, /publish_status IN \('awaiting_approval', 'awaiting_setup'\)/);
   assert.match(worker, /schedulePublicationQueue\(env, settings\.publish_interval_minutes, "append"\)/);
   assert.match(worker, /repairPublicationQueueIfNeeded\(env, settings\.publish_interval_minutes\)/);
+  assert.match(worker, /if \(!settings\.auto_publish_enabled\) \{\s*return \{ processed: false, reason: "disabled" \};/);
   assert.match(worker, /NOT EXISTS \(SELECT 1 FROM reels active/);
   assert.match(worker, /ORDER BY datetime\(COALESCE\(completed_at, created_at\)\), id/);
   const dashboardRoute = worker.slice(
