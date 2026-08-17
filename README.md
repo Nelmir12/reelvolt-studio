@@ -31,6 +31,8 @@ Na fila automática, a sequência é FIFO pela data em que o MP4 ficou pronto. U
 novo Reel é acrescentado depois do último slot reservado; excluir um item ainda
 não iniciado reequilibra os slots restantes. O dashboard é somente leitura e o
 worker impede que dois Reels entrem simultaneamente na etapa de publicação.
+Quando a fila está desligada, o cron não inicia nem retoma publicações; um item
+em andamento só continua depois de um clique manual do usuário.
 
 O experimento de publicação no YouTube foi retirado. As tabelas e os registros
 históricos permanecem preservados no D1, mas nenhuma nova opção, rota ou

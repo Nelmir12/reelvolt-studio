@@ -200,6 +200,9 @@ mais recente.
 - Leituras do dashboard não devem reagendar nem iniciar publicações. Inclusão,
   mudança explícita de intervalo, exclusão e o cron são os únicos pontos que
   podem alterar a programação.
+- O cron deve encerrar sem iniciar ou retomar publicações quando a fila
+  automática estiver desligada. Nesse modo, somente um clique manual explícito
+  pode continuar um item que já estava ativo.
 - Não invente métricas indisponíveis. Mostre indisponibilidade ou erro de
   permissão quando a Meta não fornecer um dado.
 - Diferencie claramente constatações oficiais da Meta de hipóteses sobre alcance

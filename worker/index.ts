@@ -1743,6 +1743,9 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
 async function processPublicationQueue(env: Env, baseUrl: string) {
   if (!metaConnected(env)) return { processed: false };
   const settings = await studioSettings(env);
+  if (!settings.auto_publish_enabled) {
+    return { processed: false, reason: "disabled" };
+  }
   const activeRows = await env.DB.prepare(`SELECT id FROM reels
     WHERE archived_at IS NULL AND status = 'ready'
       AND publish_status IN ('creating', 'processing', 'publishing')
@@ -3053,7 +3056,7 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
           error: `O Reel #${oldestActive.id}, preparado antes, precisa ser concluído primeiro.`,
         }, { status: 409 });
       }
-      ctx.waitUntil(processPublicationQueue(env, baseUrl));
+      ctx.waitUntil(publishReel(record, env, baseUrl));
       return json({ accepted: true, id: record.id, queued: false }, { status: 202 });
     }
     const result = await approveReel(record, env, baseUrl, ctx);
