@@ -11,6 +11,9 @@ Insights, PWA e renderização. Nenhum Reel real foi publicado e a fila não foi
   A consulta não identifica, por si só, qual versão está atendendo cada requisição.
 - O endereço de produção respondeu HTTP 307 para o login do ChatGPT.
 - Consulta somente leitura ao D1 encontrou a fila desligada, com intervalo de 240 minutos.
+- Foram consultados 71 registros: 56 publicados, oito bloqueados, um somente
+  download, um aguardando aprovação e cinco em estados antigos de processamento
+  ou publicação (IDs 60, 67, 68, 70 e 71). Nenhum desses estados foi alterado.
 - A última sincronização registrada de Insights estava concluída, sem erro,
   em 20/08/2026, com 56 de 56 alvos atualizados. Isso não comprova a validade atual do token.
 - Não houve eventos de erro retornados na janela de 60 minutos consultada.
@@ -39,11 +42,13 @@ Imagens de marca e fontes de capa foram preservadas.
    sem colocá-lo numa fila desligada.
 2. A reserva de um item automático usa creating, eliminando a espera indevida
    de 15 minutos que ocorria ao confundir a reserva com uma publicação enviada.
-3. Uma trava global no D1 serializa as execuções. As reservas manuais são
+3. Uma trava global no D1 serializa as execuções. Estados antigos sobrepostos
+   são retomados pelo primeiro preparado, sem impedir a recuperação. As reservas manuais são
    condicionais; cliques simultâneos não criam contêineres duplicados.
 4. A retomada relê o registro e preserva o contêiner quando a resposta da
    publicação fica incerta. Falhas anteriores ao envio não são reconciliadas
-   com publicações recentes apenas pela legenda.
+   com publicações recentes apenas pela legenda. A reconciliação exige que
+   o contêiner esteja confirmado como PUBLISHED pela Meta.
 5. Chamadas da publicação e renovação do token têm timeout de 20 segundos.
 6. JSON malformado recebe HTTP 400 sem detalhes internos.
 7. Ajustados os tipos da configuração TypeScript e da URL capturada pelo cron.
@@ -58,8 +63,8 @@ exclusão com preservação de métricas, mudanças de configuração, fila desl
 publicação manual e automática, concorrência, falha e resposta incerta da Meta.
 Inclui atualização de Insights e preservação dos valores após erro de permissão.
 
-Resultados: npm test passou com build e 29 testes (7 de renderização/contratos
-e 22 de integração). npm run lint passou sem erros, com quatro avisos
+Resultados: npm test passou com build e 31 testes (7 de renderização/contratos
+e 24 de integração). npm run lint passou sem erros, com quatro avisos
 preexistentes sobre uso de img. A checagem TypeScript sem emissão passou.
 git diff --check passou. Nenhuma chamada de publicação real foi executada.
 
@@ -86,3 +91,5 @@ respostas incertas, conferir o resultado no Instagram antes de intervenções ma
 
 A versão candidata deve ser salva a partir do commit validado e enviado. A
 implantação e qualquer publicação real continuam dependendo de autorização.
+
+Referência do estado PUBLISHED: [coleção oficial da Meta](https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api?entity=request-23987686-ab559ffb-8e2c-4b0a-b43a-5737b6d2f672).

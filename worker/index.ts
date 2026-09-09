@@ -1375,6 +1375,9 @@ function databaseTimestamp(value: string | null) {
 }
 
 async function reconcilePublishedReel(record: ReelRecord, env: Env) {
+  if (!record.instagram_container_id) return false;
+  const container = await graphRequest(record.instagram_container_id, env, "GET", { fields: "status_code" });
+  if (container.status_code !== "PUBLISHED") return false;
   const credentials = await instagramCredentials(env);
   const values = new URLSearchParams({
     fields: "id,caption,permalink,timestamp,media_type,media_product_type",
@@ -1439,10 +1442,12 @@ async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
   return withPublicationLock(env.DB, async () => {
     const current = await reelById(record.id, env);
     if (!current || current.publish_status === "published") return;
-    const otherActive = await env.DB.prepare(`SELECT id FROM reels WHERE id <> ?
-      AND archived_at IS NULL AND publish_status IN ('creating', 'processing', 'publishing') LIMIT 1`)
-      .bind(record.id).first<{ id: number }>();
-    if (otherActive) return;
+    const firstActive = await env.DB.prepare(`SELECT id FROM reels
+      WHERE archived_at IS NULL AND status = 'ready'
+        AND publish_status IN ('creating', 'processing', 'publishing')
+      ORDER BY datetime(COALESCE(completed_at, created_at)), id LIMIT 1`)
+      .first<{ id: number }>();
+    if (firstActive && firstActive.id !== record.id) return;
     return executePublication(current, env, baseUrl);
   });
 }
@@ -1517,6 +1522,13 @@ async function executePublication(record: ReelRecord, env: Env, baseUrl: string)
         "GET",
         { fields: "status_code,status" },
       );
+      if (status.status_code === "PUBLISHED") {
+        publicationSent = true;
+        if (await reconcilePublishedReel(record, env)) return;
+        await env.DB.prepare("UPDATE reels SET publish_status = 'publishing', publish_error = ? WHERE id = ?")
+          .bind("A Meta confirma a publicação. Aguardando identificar o Reel publicado; não envie novamente.", record.id).run();
+        return;
+      }
       if (status.status_code === "FINISHED") {
         finished = true;
         break;

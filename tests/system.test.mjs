@@ -216,3 +216,21 @@ test('Insights permission errors preserve previous metrics and report failure',a
   assert.equal(f.sqlite.prepare('SELECT views FROM reel_insights WHERE reel_id=?').get(id).views,123);
   const sync=f.sqlite.prepare('SELECT * FROM instagram_insight_sync').get();assert.equal(sync.status,'failed');assert.match(sync.last_error,/Missing permission/);
 });
+
+
+test('legacy overlapping states resume oldest first without deadlocking recovery',async t=>{
+  const f=await setup(t);const calls=meta(t);
+  const oldest=seedReel(f,{publish_status:'processing',instagram_container_id:'container-1'});
+  const later=seedReel(f,{publish_status:'processing',instagram_container_id:'container-2',completed_at:'2026-09-02 12:00:00'});
+  assert.equal((await f.request('/api/reels/'+later+'/publish',{method:'POST'})).status,409);
+  assert.equal((await f.request('/api/reels/'+oldest+'/publish',{method:'POST'})).status,202);await f.drain();
+  assert.equal(row(f,oldest).publish_status,'published');assert.equal(row(f,later).publish_status,'processing');assert.equal(calls.filter(c=>c.path.endsWith('/media_publish')).length,1);
+});
+
+
+test('Meta PUBLISHED status never submits another publication when the media ID is unknown',async t=>{
+  const f=await setup(t);const id=seedReel(f,{publish_status:'processing',instagram_container_id:'container-1'});let writes=0;
+  t.mock.method(globalThis,'fetch',async(input,options={})=>{if(options.method==='POST')writes++;return Response.json(String(input).includes('/container-1')?{status_code:'PUBLISHED'}:{data:[]});});
+  await f.request('/api/reels/'+id+'/publish',{method:'POST'});await f.drain();
+  assert.equal(writes,0);assert.equal(row(f,id).publish_status,'publishing');assert.match(row(f,id).publish_error,/Meta confirma/);
+});
