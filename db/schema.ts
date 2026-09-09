@@ -239,3 +239,9 @@ export const youtubeInsightSnapshots = sqliteTable("youtube_insight_snapshots", 
   uniqueIndex("youtube_insight_snapshots_milestone_idx").on(table.reelId, table.milestone),
   index("youtube_insight_snapshots_reel_idx").on(table.reelId, table.capturedAt),
 ]);
+
+export const instagramPublicationLock = sqliteTable("instagram_publication_lock", {
+  id: integer("id").primaryKey(),
+  token: text("token").notNull(),
+  expiresAt: integer("expires_at").notNull(),
+});

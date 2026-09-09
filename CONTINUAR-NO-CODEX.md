@@ -87,3 +87,9 @@ da Meta e do resolvedor podem aparecer desconectados localmente.
 - Instagram: <https://www.instagram.com/btsupply_/>
 - Meta Developers: <https://developers.facebook.com/apps/1531654185099586/>
 - GitHub: <https://github.com/Nelmir12/reelvolt-studio>
+
+## Revisão de setembro de 2026
+
+Consulte [REVISAO-SISTEMA.md](REVISAO-SISTEMA.md) para os achados, testes e limites
+da verificação. A migração 0014 adiciona somente a trava de publicação. Preserve
+as tabelas históricas do YouTube mesmo após a retirada de seus executores.

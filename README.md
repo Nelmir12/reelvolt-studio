@@ -155,3 +155,20 @@ callback não estiver liberado pela Meta, o Direct não entrega eventos reais. A
 alternativa gratuita é o Atalho privado do iPhone: ele envia a URL diretamente
 ao ReelVolt e prepara o MP4. Com a fila desligada, cada item exige um clique;
 com a fila ligada, os itens preparados entram automaticamente na programação.
+
+## Revisão e testes do sistema
+
+A publicação manual e o cron compartilham uma trava temporária no D1. A migração
+progressiva `0014_marvelous_pride.sql` cria somente essa tabela; não altera
+vídeos, credenciais ou históricos. Uma execução interrompida libera a trava por
+expiração em até dez minutos. Reels do Direct seguem o mesmo modo manual ou
+automático do painel.
+
+O código operacional do experimento do YouTube foi removido. Apenas o schema
+histórico e os registros de autorização ficam em `worker/content-targets.ts`.
+As rotas antigas continuam retornando HTTP 410.
+
+`npm test` compila o aplicativo e executa testes de renderização e integração
+contra o worker compilado, usando SQLite temporário, R2 em memória e respostas
+simuladas da Meta. Nenhum teste publica conteúdo real. O relatório da revisão
+está em [REVISAO-SISTEMA.md](REVISAO-SISTEMA.md).

@@ -285,3 +285,14 @@ publicado sem evidência.
   em produção e publicação no Instagram.
 - Atualize este arquivo quando arquitetura, comandos ou integrações mudarem.
 - Peça autorização antes de alterar as fronteiras de autonomia e aprovação.
+
+### Revisão de setembro de 2026
+
+- O código operacional legado do YouTube foi removido;
+  `worker/content-targets.ts` preserva somente compatibilidade de schema e
+  autorização, sem OAuth, publicação, executor ou consultas externas.
+- A publicação manual e automática usa uma trava global temporária no D1,
+  em `instagram_publication_lock`, criada pela migração progressiva 0014.
+- `npm test` inclui renderização e integração contra o worker compilado, com
+  SQLite temporário e serviços externos simulados. Também valide os tipos com
+  `npx tsc --noEmit --incremental false`.

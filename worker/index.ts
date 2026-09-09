@@ -5,16 +5,17 @@ import {
   createContentTargets,
   publicationDestinations,
   type ContentTargetInput,
-  type YouTubeEnv,
-} from "./youtube";
+  type ContentEnv,
+} from "./content-targets";
 import { extractInstagramEmbedVideoUrl, instagramEmbedUrl } from "./instagram-embed";
+import { CREATE_PUBLICATION_LOCK, withPublicationLock } from "./publication-lock";
 import {
   buildPublicationSchedule,
   nextPublicationStart,
   publicationScheduleNeedsRepair,
 } from "./publication-queue";
 
-interface Env extends YouTubeEnv {
+interface Env extends ContentEnv {
   ASSETS: Fetcher;
   IMAGES: {
     input(stream: ReadableStream): {
@@ -357,6 +358,7 @@ async function ensureDatabase(env: Env) {
     env.DB.prepare(CREATE_REEL_INSIGHTS_DAY_INDEX),
     env.DB.prepare(CREATE_REEL_INSIGHTS_REEL_INDEX),
     env.DB.prepare(CREATE_INSTAGRAM_INSIGHT_SYNC),
+    env.DB.prepare(CREATE_PUBLICATION_LOCK),
     ...YOUTUBE_SCHEMA_STATEMENTS.map((statement) => env.DB.prepare(statement)),
   ]);
 
@@ -627,7 +629,7 @@ async function instagramCredentials(env: Env): Promise<InstagramCredentials> {
     const refreshUrl = new URL("https://graph.instagram.com/refresh_access_token");
     refreshUrl.searchParams.set("grant_type", "ig_refresh_token");
     refreshUrl.searchParams.set("access_token", accessToken);
-    const response = await fetch(refreshUrl);
+    const response = await fetch(refreshUrl, { signal: AbortSignal.timeout(20_000) });
     const result = await response.json() as {
       access_token?: string;
       expires_in?: number;
@@ -847,8 +849,9 @@ async function graphRequest(
       method,
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: values,
+      signal: AbortSignal.timeout(20_000),
     })
-    : await fetch(`${endpoint}?${values.toString()}`);
+    : await fetch(`${endpoint}?${values.toString()}`, { signal: AbortSignal.timeout(20_000) });
   const result = await response.json() as {
     id?: string;
     status?: string;
@@ -1380,6 +1383,7 @@ async function reconcilePublishedReel(record: ReelRecord, env: Env) {
   });
   const response = await fetch(
     `${metaBaseUrl(env)}/${credentials.userId}/media?${values.toString()}`,
+    { signal: AbortSignal.timeout(20_000) },
   );
   const result = await response.json() as {
     data?: InstagramPublishedMedia[];
@@ -1432,6 +1436,18 @@ async function reconcilePublishedReel(record: ReelRecord, env: Env) {
 }
 
 async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
+  return withPublicationLock(env.DB, async () => {
+    const current = await reelById(record.id, env);
+    if (!current || current.publish_status === "published") return;
+    const otherActive = await env.DB.prepare(`SELECT id FROM reels WHERE id <> ?
+      AND archived_at IS NULL AND publish_status IN ('creating', 'processing', 'publishing') LIMIT 1`)
+      .bind(record.id).first<{ id: number }>();
+    if (otherActive) return;
+    return executePublication(current, env, baseUrl);
+  });
+}
+
+async function executePublication(record: ReelRecord, env: Env, baseUrl: string) {
   if (!metaConnected(env)) {
     await env.DB.prepare(
       "UPDATE reels SET publish_status = 'awaiting_setup', publish_error = ? WHERE id = ?",
@@ -1442,6 +1458,7 @@ async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
     throw new Error("O MP4 ainda não está pronto para publicação.");
   }
 
+  let publicationSent = record.publish_status === "publishing";
   try {
     if (record.publish_status === "publishing") {
       try {
@@ -1518,6 +1535,7 @@ async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
     await env.DB.prepare(`UPDATE reels SET publish_status = 'publishing', publish_error = NULL,
       publish_requested_at = CURRENT_TIMESTAMP WHERE id = ?`)
       .bind(record.id).run();
+    publicationSent = true;
     const published = await graphRequest(
       `${env.INSTAGRAM_USER_ID}/media_publish`,
       env,
@@ -1539,14 +1557,14 @@ async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
       .bind(published.id, permalink, record.id).run();
   } catch (error) {
     try {
-      if (await reconcilePublishedReel(record, env)) return;
+      if (publicationSent && await reconcilePublishedReel(record, env)) return;
     } catch (reconciliationError) {
       console.warn("A publicação não pôde ser reconciliada após a resposta da Meta:", reconciliationError);
     }
     const message = error instanceof Error ? error.message : "Falha desconhecida na publicação.";
     await env.DB.prepare(
-      "UPDATE reels SET publish_status = 'failed', publish_error = ? WHERE id = ?",
-    ).bind(message.slice(0, 700), record.id).run();
+      "UPDATE reels SET publish_status = ?, publish_error = ? WHERE id = ?",
+    ).bind(publicationSent ? "publishing" : "failed", message.slice(0, 700), record.id).run();
   }
 }
 
@@ -1709,14 +1727,13 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
     return { queued: false, scheduledFor: null };
   }
 
-  const usesScheduledQueue = Boolean(settings.auto_publish_enabled)
-    || record.sender_id.startsWith("instagram:");
+  const usesScheduledQueue = Boolean(settings.auto_publish_enabled);
   if (usesScheduledQueue) {
     await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
       caption_enabled = ?, cover_mode = ?, cover_key = ?, approved_at = CURRENT_TIMESTAMP,
       scheduled_for = NULL, publish_status = 'queued', publish_error = NULL,
       instagram_container_id = NULL, publish_requested_at = NULL
-      WHERE id = ?`)
+      WHERE id = ? AND publish_status NOT IN ('creating', 'processing', 'publishing', 'published')`)
       .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, record.id)
       .run();
     await schedulePublicationQueue(env, settings.publish_interval_minutes, "append");
@@ -1727,13 +1744,17 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
     return { queued: true, scheduledFor };
   }
 
-  await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
+  const claimed = await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
     caption_enabled = ?, cover_mode = ?, cover_key = ?, approved_at = CURRENT_TIMESTAMP,
-    scheduled_for = NULL, publish_status = 'queued', publish_error = NULL,
+    scheduled_for = NULL, publish_status = 'creating', publish_error = NULL,
     instagram_container_id = NULL, publish_requested_at = NULL
-    WHERE id = ?`)
+    WHERE id = ? AND publish_status NOT IN ('creating', 'processing', 'publishing', 'published')
+      AND NOT EXISTS (SELECT 1 FROM reels active WHERE active.id <> reels.id
+        AND active.archived_at IS NULL
+        AND active.publish_status IN ('creating', 'processing', 'publishing'))`)
     .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, record.id)
     .run();
+  if (!claimed.meta.changes) return { queued: false, scheduledFor: null, busy: true };
   const approved = await reelById(record.id, env);
   if (!approved) throw new Error("O Reel aprovado não pôde ser recarregado.");
   ctx.waitUntil(publishReel(approved, env, baseUrl));
@@ -1746,21 +1767,6 @@ async function processPublicationQueue(env: Env, baseUrl: string) {
   if (!settings.auto_publish_enabled) {
     return { processed: false, reason: "disabled" };
   }
-  const activeRows = await env.DB.prepare(`SELECT id FROM reels
-    WHERE archived_at IS NULL AND status = 'ready'
-      AND publish_status IN ('creating', 'processing', 'publishing')
-    ORDER BY datetime(COALESCE(completed_at, created_at)), id`)
-    .all<{ id: number }>();
-  for (const active of activeRows.results) {
-    const activeRecord = await reelById(active.id, env);
-    if (!activeRecord) continue;
-    try {
-      await reconcilePublishedReel(activeRecord, env);
-    } catch (error) {
-      console.warn(`A publicação em andamento do Reel #${active.id} não pôde ser reconciliada.`, error);
-    }
-  }
-
   const latestPublished = await env.DB.prepare(
     "SELECT MAX(published_at) AS published_at FROM reels WHERE publish_status = 'published'",
   ).first<{ published_at: string | null }>();
@@ -1789,7 +1795,7 @@ async function processPublicationQueue(env: Env, baseUrl: string) {
       AND datetime(scheduled_for) <= CURRENT_TIMESTAMP
     ORDER BY datetime(COALESCE(completed_at, created_at)), id LIMIT 1`).first<{ id: number }>();
   if (!due) return { processed: false };
-  const claim = await env.DB.prepare(`UPDATE reels SET publish_status = 'publishing',
+  const claim = await env.DB.prepare(`UPDATE reels SET publish_status = 'creating',
     publish_requested_at = COALESCE(publish_requested_at, CURRENT_TIMESTAMP)
     WHERE id = ? AND archived_at IS NULL AND status = 'ready' AND publish_status = 'queued'
       AND NOT EXISTS (SELECT 1 FROM reels active
@@ -3060,6 +3066,7 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       return json({ accepted: true, id: record.id, queued: false }, { status: 202 });
     }
     const result = await approveReel(record, env, baseUrl, ctx);
+    if ("busy" in result && result.busy) return json({ error: "Já existe uma publicação em andamento. Aguarde a conclusão." }, { status: 409 });
     return json({ accepted: true, id: record.id, ...result }, { status: 202 });
   }
 
@@ -3159,15 +3166,21 @@ const worker = {
         },
       }, allowedWidths);
     }
-    const apiResponse = await api(request, env, ctx);
-    return apiResponse ?? handler.fetch(request, env, ctx);
+    try {
+      const apiResponse = await api(request, env, ctx);
+      return apiResponse ?? handler.fetch(request, env, ctx);
+    } catch (error) {
+      if (error instanceof SyntaxError) return json({ error: "Corpo JSON inválido." }, { status: 400 });
+      return json({ error: "Não foi possível concluir a solicitação. Tente novamente." }, { status: 500 });
+    }
   },
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     await ensureDatabase(env);
-    if (!env.PUBLIC_BASE_URL) return;
+    const baseUrl = env.PUBLIC_BASE_URL;
+    if (!baseUrl) return;
     ctx.waitUntil((async () => {
       await tryAuthorizeAutomaticPublicationQueue(env);
-      await processPublicationQueue(env, env.PUBLIC_BASE_URL.replace(/\/+$/, ""));
+      await processPublicationQueue(env, baseUrl.replace(/\/+$/, ""));
     })());
     if (new Date(controller.scheduledTime).getUTCMinutes() === 5) {
       if (metaConnected(env)) await startInsightRefresh(env, ctx);

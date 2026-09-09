@@ -142,7 +142,7 @@ test("server-renders the analytics dashboard tab", async () => {
 test("declares the protected Instagram flow and retires YouTube publishing", async () => {
   const [worker, youtube, readme, manifest, inbox, analytics, reelDownloader] = await Promise.all([
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
-    readFile(new URL("../worker/youtube.ts", import.meta.url), "utf8"),
+    readFile(new URL("../worker/content-targets.ts", import.meta.url), "utf8"),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
     readFile(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"),
     readFile(new URL("../app/inbox-client.tsx", import.meta.url), "utf8"),
@@ -236,9 +236,8 @@ test("declares the protected Instagram flow and retires YouTube publishing", asy
   assert.doesNotMatch(worker, /ORDER BY r\.id DESC LIMIT 80/);
   assert.match(worker, /instagram_media_id, instagram_permalink FROM reels/);
   assert.match(worker, /destinations/);
-  assert.match(youtube, /YOUTUBE_PUBLISHING_ENABLED = false/);
-  assert.match(youtube, /youtube_publishing_retired/);
-  assert.match(youtube, /A publicação no YouTube foi desativada no ReelVolt/);
+  assert.doesNotMatch(youtube, /dispatchYouTubeExecutor|googleAccessToken|handleYouTubeRequest/);
+  assert.match(youtube, /CREATE TABLE IF NOT EXISTS youtube_auth/);
   assert.doesNotMatch(worker, /queueYouTubePublication|dispatchYouTubeExecutor|youtubeConnection/);
   assert.match(worker, /A publicação no YouTube foi retirada do ReelVolt/);
   assert.doesNotMatch(worker, /TELEGRAM_BOT_TOKEN|telegram\/webhook/i);
