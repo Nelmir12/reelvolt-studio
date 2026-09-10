@@ -147,16 +147,23 @@ test('intake downloads once, deduplicates canonical URLs and requires authorizat
 });
 
 test('non-video resolver responses fall through to the authenticated external executor',async t=>{
-  const f=await setup(t);f.env.REEL_RESOLVER_URL='https://resolver.test/resolve';f.env.GITHUB_ACTIONS_TOKEN='test-only-github';f.env.GITHUB_REPOSITORY='owner/repository';f.env.GITHUB_WORKFLOW_ID='legacy-reel-downloader.yml';f.env.GITHUB_WORKFLOW_REF='production';let dispatches=0;
+  const f=await setup(t);f.env.REEL_RESOLVER_URL='https://resolver.test/resolve';f.env.GITHUB_ACTIONS_TOKEN='test-only-github';f.env.GITHUB_REPOSITORY='owner/repository';f.env.GITHUB_WORKFLOW_ID='youtube-uploader.yml';f.env.GITHUB_WORKFLOW_REF='retired-youtube';let dispatches=0;
   t.mock.method(globalThis,'fetch',async(input,options={})=>{
     const url=new URL(String(input));
     if(url.hostname==='resolver.test')return Response.json({url:'https://cdn.test/not-a-video'});
     if(url.hostname==='cdn.test')return new Response('<html>access denied</html>',{headers:{'content-type':'text/html'}});
-    if(url.hostname==='api.github.com'){dispatches++;assert.equal(options.method,'POST');assert.match(url.pathname,/legacy-reel-downloader\.yml/);assert.equal(JSON.parse(options.body).ref,'production');return new Response(null,{status:204});}
+    if(url.hostname==='api.github.com'){dispatches++;assert.equal(options.method,'POST');assert.match(url.pathname,/reel-downloader\.yml/);assert.equal(JSON.parse(options.body).ref,'master');return new Response(null,{status:204});}
     return new Response('<html>no public video</html>',{headers:{'content-type':'text/html'}});
   });
   const response=await f.request('/api/reels/intake',{method:'POST',body:{url:'https://www.instagram.com/reel/FallbackTest/',rightsConfirmed:true}});assert.equal(response.status,202);await f.drain();
   const reel=f.sqlite.prepare('SELECT * FROM reels').get();assert.equal(reel.status,'downloading');assert.equal(reel.error,null);assert.equal(dispatches,1);
+});
+
+test('external executor startup failures become visible instead of leaving a Reel processing forever',async t=>{
+  const f=await setup(t);f.env.GITHUB_ACTIONS_TOKEN='test-only-github';f.env.GITHUB_REPOSITORY='owner/repository';t.mock.method(console,'warn',()=>{});t.mock.method(console,'error',()=>{});
+  t.mock.method(globalThis,'fetch',async input=>new URL(String(input)).hostname==='api.github.com'?new Response('workflow missing',{status:404}):new Response('<html>blocked</html>',{headers:{'content-type':'text/html'}}));
+  const response=await f.request('/api/reels/intake',{method:'POST',body:{url:'https://www.instagram.com/reel/ExecutorFailure/',rightsConfirmed:true}});assert.equal(response.status,202);await f.drain();
+  const reel=f.sqlite.prepare('SELECT * FROM reels').get();assert.equal(reel.status,'failed');assert.match(reel.error,/GitHub 404/);
 });
 
 test('repeated failed URLs reuse one record and cannot prepare duplicate MP4s',async t=>{

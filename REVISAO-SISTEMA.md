@@ -99,9 +99,7 @@ respostas incertas, conferir o resultado no Instagram antes de intervenções ma
   validação ocorria depois do bloco que aciona o GitHub Actions e, por isso, ambos
   terminavam em `failed` sem chamar o executor alternativo.
 - O resolvedor agora rejeita respostas que não sejam vídeo em cada etapa e deixa
-  esse erro cair no executor autenticado. Os nomes históricos
-  `GITHUB_WORKFLOW_ID` e `GITHUB_WORKFLOW_REF`, ainda presentes no Sites, seguem
-  aceitos durante a migração.
+  esse erro cair no executor autenticado.
 - Como os IDs 72 e 73 apontam para o mesmo link, a entrada agora reaproveita o
   registro falho mais recente e impede que duas tentativas do mesmo Reel preparem
   MP4s independentes.
@@ -111,6 +109,15 @@ respostas incertas, conferir o resultado no Instagram antes de intervenções ma
   callback continua configurado no repositório.
 - Nenhum Reel real foi publicado, nenhum registro do D1 foi alterado e nenhum
   objeto do R2 foi removido durante o diagnóstico.
+
+### Correção complementar após a implantação 1.35
+
+A produção ainda mantinha `GITHUB_WORKFLOW_ID=youtube-uploader.yml`. A
+compatibilidade adicionada na 1.35 fez o fallback selecionar esse workflow já
+retirado, impedindo o despacho dos Reels 73 e 74. O downloader passa a usar
+somente `REEL_DOWNLOAD_WORKFLOW_ID`/`REEL_DOWNLOAD_WORKFLOW_REF`, com os padrões
+seguros `reel-downloader.yml` e `master`. Falhas ao iniciar o GitHub Actions agora
+ficam visíveis no registro em vez de parecerem processamento indefinido.
 
 A versão candidata deve ser salva a partir do commit validado e enviado. A
 implantação e qualquer publicação real continuam dependendo de autorização.

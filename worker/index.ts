@@ -30,8 +30,6 @@ interface Env extends ContentEnv {
   REEL_RESOLVER_URL?: string;
   REEL_RESOLVER_TOKEN?: string;
   REEL_RESOLVER_AUTH_SCHEME?: string;
-  GITHUB_WORKFLOW_ID?: string;
-  GITHUB_WORKFLOW_REF?: string;
   REEL_DOWNLOAD_WORKFLOW_ID?: string;
   REEL_DOWNLOAD_WORKFLOW_REF?: string;
   REEL_DOWNLOAD_WORKER_SECRET?: string;
@@ -804,14 +802,8 @@ function externalResolverConfigured(env: Env) {
 
 async function dispatchExternalResolver(record: ReelRecord, env: Env) {
   if (!externalResolverConfigured(env)) return false;
-  const workflow = encodeURIComponent(
-    env.REEL_DOWNLOAD_WORKFLOW_ID?.trim()
-      || env.GITHUB_WORKFLOW_ID?.trim()
-      || "reel-downloader.yml",
-  );
-  const ref = env.REEL_DOWNLOAD_WORKFLOW_REF?.trim()
-    || env.GITHUB_WORKFLOW_REF?.trim()
-    || "master";
+  const workflow = encodeURIComponent(env.REEL_DOWNLOAD_WORKFLOW_ID?.trim() || "reel-downloader.yml");
+  const ref = env.REEL_DOWNLOAD_WORKFLOW_REF?.trim() || "master";
   const baseUrl = env.PUBLIC_BASE_URL?.replace(/\/+$/, "");
   if (!baseUrl) return false;
 
@@ -839,7 +831,7 @@ async function dispatchExternalResolver(record: ReelRecord, env: Env) {
   if (!response.ok) {
     const details = sanitizeText(await response.text(), 300);
     console.warn(`O executor alternativo recusou o Reel #${record.id} (GitHub ${response.status}).`, details);
-    return false;
+    throw new Error(`O executor alternativo não pôde ser iniciado (GitHub ${response.status}).`);
   }
   await env.DB.prepare(`UPDATE reels SET status = 'downloading', error = NULL,
     publish_status = CASE WHEN publication_mode = 'download_only' THEN 'not_requested' ELSE 'awaiting_download' END,

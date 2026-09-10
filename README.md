@@ -51,8 +51,9 @@ As variáveis estão documentadas em `.env.example`:
   `REEL_RESOLVER_AUTH_SCHEME`: fallback privado/licenciado.
 - `GITHUB_ACTIONS_TOKEN`, `GITHUB_REPOSITORY`,
   `REEL_DOWNLOAD_WORKFLOW_ID` e `REEL_DOWNLOAD_WORKFLOW_REF`: executor
-  alternativo para bloqueios de IP do resolvedor principal. Durante a migração,
-  `GITHUB_WORKFLOW_ID` e `GITHUB_WORKFLOW_REF` continuam aceitas como fallback.
+  alternativo para bloqueios de IP do resolvedor principal. As variáveis antigas
+  `GITHUB_WORKFLOW_ID` e `GITHUB_WORKFLOW_REF` pertenciam ao executor retirado do
+  YouTube e não são usadas para baixar Reels.
 - `REEL_DOWNLOAD_WORKER_SECRET`: autentica o retorno do MP4; durante a
   migração, o segredo histórico `YOUTUBE_WORKER_SECRET` é aceito somente como
   credencial interna compatível, sem reativar nenhuma função do YouTube.
