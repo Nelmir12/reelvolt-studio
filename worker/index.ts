@@ -30,6 +30,8 @@ interface Env extends ContentEnv {
   REEL_RESOLVER_URL?: string;
   REEL_RESOLVER_TOKEN?: string;
   REEL_RESOLVER_AUTH_SCHEME?: string;
+  GITHUB_WORKFLOW_ID?: string;
+  GITHUB_WORKFLOW_REF?: string;
   REEL_DOWNLOAD_WORKFLOW_ID?: string;
   REEL_DOWNLOAD_WORKFLOW_REF?: string;
   REEL_DOWNLOAD_WORKER_SECRET?: string;
@@ -688,6 +690,12 @@ async function validMediaSignature(reelId: number, url: URL, env: Env) {
   return expected === provided;
 }
 
+function isVideoResponse(response: Response) {
+  if (!response.ok || !response.body) return false;
+  const contentType = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+  return !contentType || contentType.startsWith("video/") || contentType === "application/octet-stream";
+}
+
 async function resolveVideo(sourceUrl: string, env: Env) {
   let resolverFailure: string | null = null;
   const direct = await fetch(sourceUrl, {
@@ -698,7 +706,7 @@ async function resolveVideo(sourceUrl: string, env: Env) {
     redirect: "follow",
   });
   const directType = direct.headers.get("content-type") ?? "";
-  if (direct.ok && directType.startsWith("video/") && direct.body) return { response: direct };
+  if (isVideoResponse(direct) && directType.startsWith("video/")) return { response: direct };
 
   if (direct.ok && directType.includes("text/html")) {
     const html = await direct.text();
@@ -709,7 +717,8 @@ async function resolveVideo(sourceUrl: string, env: Env) {
         headers: { referer: "https://www.instagram.com/" },
         redirect: "follow",
       });
-      if (response.ok && response.body) return { response };
+      if (isVideoResponse(response)) return { response };
+      if (response.ok) resolverFailure = "o arquivo público retornado não era um vídeo";
     }
   }
 
@@ -733,8 +742,10 @@ async function resolveVideo(sourceUrl: string, env: Env) {
           },
           redirect: "follow",
         });
-        if (response.ok && response.body) return { response };
-        resolverFailure = `arquivo público retornado com HTTP ${response.status}`;
+        if (isVideoResponse(response)) return { response };
+        resolverFailure = response.ok
+          ? "o arquivo público retornado não era um vídeo"
+          : `arquivo público retornado com HTTP ${response.status}`;
       }
     }
   }
@@ -770,8 +781,10 @@ async function resolveVideo(sourceUrl: string, env: Env) {
       const videoUrl = result.videoUrl ?? result.url ?? result.download_url ?? pickedVideo ?? result.tunnel?.[0];
       if (typeof videoUrl === "string") {
         const response = await fetch(videoUrl, { redirect: "follow" });
-        if (response.ok && response.body) return { response };
-        resolverFailure = `arquivo retornado com HTTP ${response.status}`;
+        if (isVideoResponse(response)) return { response };
+        resolverFailure = response.ok
+          ? "o arquivo retornado não era um vídeo"
+          : `arquivo retornado com HTTP ${response.status}`;
       } else {
         resolverFailure = result.error?.code || `resposta ${result.status || "sem arquivo"}`;
       }
@@ -791,8 +804,14 @@ function externalResolverConfigured(env: Env) {
 
 async function dispatchExternalResolver(record: ReelRecord, env: Env) {
   if (!externalResolverConfigured(env)) return false;
-  const workflow = encodeURIComponent(env.REEL_DOWNLOAD_WORKFLOW_ID?.trim() || "reel-downloader.yml");
-  const ref = env.REEL_DOWNLOAD_WORKFLOW_REF?.trim() || "master";
+  const workflow = encodeURIComponent(
+    env.REEL_DOWNLOAD_WORKFLOW_ID?.trim()
+      || env.GITHUB_WORKFLOW_ID?.trim()
+      || "reel-downloader.yml",
+  );
+  const ref = env.REEL_DOWNLOAD_WORKFLOW_REF?.trim()
+    || env.GITHUB_WORKFLOW_REF?.trim()
+    || "master";
   const baseUrl = env.PUBLIC_BASE_URL?.replace(/\/+$/, "");
   if (!baseUrl) return false;
 
@@ -1442,12 +1461,6 @@ async function publishReel(record: ReelRecord, env: Env, baseUrl: string) {
   return withPublicationLock(env.DB, async () => {
     const current = await reelById(record.id, env);
     if (!current || current.publish_status === "published") return;
-    const firstActive = await env.DB.prepare(`SELECT id FROM reels
-      WHERE archived_at IS NULL AND status = 'ready'
-        AND publish_status IN ('creating', 'processing', 'publishing')
-      ORDER BY datetime(COALESCE(completed_at, created_at)), id LIMIT 1`)
-      .first<{ id: number }>();
-    if (firstActive && firstActive.id !== record.id) return;
     return executePublication(current, env, baseUrl);
   });
 }
@@ -1585,18 +1598,19 @@ async function processReel(record: ReelRecord, env: Env, baseUrl?: string) {
     await env.DB.prepare("UPDATE reels SET status = 'downloading', error = NULL WHERE id = ?")
       .bind(record.id).run();
     let response: Response;
+    let contentType: string;
     try {
       ({ response } = await resolveVideo(record.source_url, env));
+      contentType = response.headers.get("content-type")?.split(";")[0] || "video/mp4";
+      if (!contentType.startsWith("video/") && contentType !== "application/octet-stream") {
+        throw new Error("A origem não retornou um vídeo.");
+      }
     } catch (resolutionError) {
       if (await dispatchExternalResolver(record, env)) {
         console.info(`O Reel #${record.id} foi encaminhado ao executor alternativo.`);
         return;
       }
       throw resolutionError;
-    }
-    const contentType = response.headers.get("content-type")?.split(";")[0] || "video/mp4";
-    if (!contentType.startsWith("video/") && contentType !== "application/octet-stream") {
-      throw new Error("A origem não retornou um vídeo.");
     }
     const storageKey = `reels/${record.id}-${crypto.randomUUID()}.mp4`;
     await env.VIDEOS.put(storageKey, response.body, {
@@ -1759,11 +1773,12 @@ async function approveReel(record: ReelRecord, env: Env, baseUrl: string, ctx: E
   const claimed = await env.DB.prepare(`UPDATE reels SET publication_mode = 'approval', caption = ?,
     caption_enabled = ?, cover_mode = ?, cover_key = ?, approved_at = CURRENT_TIMESTAMP,
     scheduled_for = NULL, publish_status = 'creating', publish_error = NULL,
-    instagram_container_id = NULL, publish_requested_at = NULL
+    instagram_container_id = NULL, publish_requested_at = CURRENT_TIMESTAMP
     WHERE id = ? AND publish_status NOT IN ('creating', 'processing', 'publishing', 'published')
       AND NOT EXISTS (SELECT 1 FROM reels active WHERE active.id <> reels.id
         AND active.archived_at IS NULL
-        AND active.publish_status IN ('creating', 'processing', 'publishing'))`)
+        AND active.publish_status IN ('creating', 'processing', 'publishing')
+        AND datetime(COALESCE(active.publish_requested_at, active.created_at)) >= datetime('now', '-15 minutes'))`)
     .bind(caption || null, settings.caption_enabled ? 1 : 0, settings.cover_mode, coverKey, record.id)
     .run();
   if (!claimed.meta.changes) return { queued: false, scheduledFor: null, busy: true };
@@ -3064,16 +3079,6 @@ async function api(request: Request, env: Env, ctx: ExecutionContext): Promise<R
       return json({ error: "Este Reel já foi publicado no Instagram." }, { status: 409 });
     }
     if (["creating", "processing", "publishing"].includes(record.publish_status)) {
-      const oldestActive = await env.DB.prepare(`SELECT id FROM reels
-        WHERE archived_at IS NULL AND status = 'ready'
-          AND publish_status IN ('creating', 'processing', 'publishing')
-        ORDER BY datetime(COALESCE(completed_at, created_at)), id LIMIT 1`)
-        .first<{ id: number }>();
-      if (oldestActive && oldestActive.id !== record.id) {
-        return json({
-          error: `O Reel #${oldestActive.id}, preparado antes, precisa ser concluído primeiro.`,
-        }, { status: 409 });
-      }
       ctx.waitUntil(publishReel(record, env, baseUrl));
       return json({ accepted: true, id: record.id, queued: false }, { status: 202 });
     }

@@ -89,6 +89,26 @@ serviços externos. A liberação do Direct pela Meta não foi comprovada nesta 
 A reconciliação histórica por legenda e horário permanece uma heurística; em
 respostas incertas, conferir o resultado no Instagram antes de intervenções manuais.
 
+## Diagnóstico dos Reels 71–73 — 10 de setembro de 2026
+
+- O Reel 71 permaneceu em `publishing` com um contêiner da Meta, mas a rota de
+  retomada devolvia HTTP 409 porque os Reels 67, 68 e 70 ainda conservavam estados
+  ativos antigos. A trava global já serializa a execução real; a retomada manual
+  agora atua exatamente no Reel selecionado, sem reenviar um contêiner confirmado.
+- Os Reels 72 e 73 receberam HTTP 200 com conteúdo HTML no lugar de vídeo. A
+  validação ocorria depois do bloco que aciona o GitHub Actions e, por isso, ambos
+  terminavam em `failed` sem chamar o executor alternativo.
+- O resolvedor agora rejeita respostas que não sejam vídeo em cada etapa e deixa
+  esse erro cair no executor autenticado. Os nomes históricos
+  `GITHUB_WORKFLOW_ID` e `GITHUB_WORKFLOW_REF`, ainda presentes no Sites, seguem
+  aceitos durante a migração.
+- A inspeção do GitHub mostrou que não houve execução do workflow em 10/09/2026,
+  confirmando que os Reels 72 e 73 falharam antes do despacho. O último acionamento
+  registrado foi concluído com sucesso em 24/08/2026; o segredo histórico de
+  callback continua configurado no repositório.
+- Nenhum Reel real foi publicado, nenhum registro do D1 foi alterado e nenhum
+  objeto do R2 foi removido durante o diagnóstico.
+
 A versão candidata deve ser salva a partir do commit validado e enviado. A
 implantação e qualquer publicação real continuam dependendo de autorização.
 

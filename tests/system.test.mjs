@@ -146,6 +146,19 @@ test('intake downloads once, deduplicates canonical URLs and requires authorizat
   const duplicate=await f.request('/api/reels/intake',{method:'POST',body:{...body,url:'https://instagram.com/reel/TestReel/'}});assert.equal((await duplicate.json()).reason,'duplicate');assert.equal(downloads,1);
 });
 
+test('non-video resolver responses fall through to the authenticated external executor',async t=>{
+  const f=await setup(t);f.env.REEL_RESOLVER_URL='https://resolver.test/resolve';f.env.GITHUB_ACTIONS_TOKEN='test-only-github';f.env.GITHUB_REPOSITORY='owner/repository';f.env.GITHUB_WORKFLOW_ID='legacy-reel-downloader.yml';f.env.GITHUB_WORKFLOW_REF='production';let dispatches=0;
+  t.mock.method(globalThis,'fetch',async(input,options={})=>{
+    const url=new URL(String(input));
+    if(url.hostname==='resolver.test')return Response.json({url:'https://cdn.test/not-a-video'});
+    if(url.hostname==='cdn.test')return new Response('<html>access denied</html>',{headers:{'content-type':'text/html'}});
+    if(url.hostname==='api.github.com'){dispatches++;assert.equal(options.method,'POST');assert.match(url.pathname,/legacy-reel-downloader\.yml/);assert.equal(JSON.parse(options.body).ref,'production');return new Response(null,{status:204});}
+    return new Response('<html>no public video</html>',{headers:{'content-type':'text/html'}});
+  });
+  const response=await f.request('/api/reels/intake',{method:'POST',body:{url:'https://www.instagram.com/reel/FallbackTest/',rightsConfirmed:true}});assert.equal(response.status,202);await f.drain();
+  const reel=f.sqlite.prepare('SELECT * FROM reels').get();assert.equal(reel.status,'downloading');assert.equal(reel.error,null);assert.equal(dispatches,1);
+});
+
 test('malformed JSON has a safe API error',async t=>{
   const f=await setup(t);const r=await f.request('/api/reels/intake',{method:'POST',body:'{'});assert.equal(r.status,400);assert.equal(r.headers.get('cache-control'),'no-store');
 });
@@ -218,13 +231,20 @@ test('Insights permission errors preserve previous metrics and report failure',a
 });
 
 
-test('legacy overlapping states resume oldest first without deadlocking recovery',async t=>{
+test('manual recovery resumes the selected legacy Reel without an older stale state blocking it',async t=>{
   const f=await setup(t);const calls=meta(t);
-  const oldest=seedReel(f,{publish_status:'processing',instagram_container_id:'container-1'});
-  const later=seedReel(f,{publish_status:'processing',instagram_container_id:'container-2',completed_at:'2026-09-02 12:00:00'});
-  assert.equal((await f.request('/api/reels/'+later+'/publish',{method:'POST'})).status,409);
-  assert.equal((await f.request('/api/reels/'+oldest+'/publish',{method:'POST'})).status,202);await f.drain();
-  assert.equal(row(f,oldest).publish_status,'published');assert.equal(row(f,later).publish_status,'processing');assert.equal(calls.filter(c=>c.path.endsWith('/media_publish')).length,1);
+  const oldest=seedReel(f,{publish_status:'processing',instagram_container_id:'stale-container',publish_requested_at:'2026-09-01 08:00:00'});
+  const selected=seedReel(f,{publish_status:'processing',instagram_container_id:'container-1',completed_at:'2026-09-02 12:00:00',publish_requested_at:'2026-09-02 12:00:00'});
+  assert.equal((await f.request('/api/reels/'+selected+'/publish',{method:'POST'})).status,202);await f.drain();
+  assert.equal(row(f,selected).publish_status,'published');assert.equal(row(f,oldest).publish_status,'processing');assert.equal(calls.filter(c=>c.path.endsWith('/media_publish')).length,1);
+});
+
+test('an abandoned legacy state does not block a newly authorized manual Reel',async t=>{
+  const f=await setup(t);const calls=meta(t);
+  const stale=seedReel(f,{publish_status:'publishing',instagram_container_id:'stale-container',publish_requested_at:'2026-09-01 08:00:00'});
+  const selected=seedReel(f);
+  assert.equal((await f.request('/api/reels/'+selected+'/publish',{method:'POST'})).status,202);await f.drain();
+  assert.equal(row(f,selected).publish_status,'published');assert.equal(row(f,stale).publish_status,'publishing');assert.equal(calls.filter(c=>c.path.endsWith('/media_publish')).length,1);
 });
 
 
