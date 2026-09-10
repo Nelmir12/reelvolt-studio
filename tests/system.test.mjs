@@ -159,6 +159,14 @@ test('non-video resolver responses fall through to the authenticated external ex
   const reel=f.sqlite.prepare('SELECT * FROM reels').get();assert.equal(reel.status,'downloading');assert.equal(reel.error,null);assert.equal(dispatches,1);
 });
 
+test('repeated failed URLs reuse one record and cannot prepare duplicate MP4s',async t=>{
+  const f=await setup(t);let downloads=0;t.mock.method(globalThis,'fetch',async()=>{downloads++;return new Response('mock-mp4',{headers:{'content-type':'video/mp4'}});});
+  const source='https://www.instagram.com/reel/SameFailedReel/';const first=seedReel(f,{source_url:source,status:'failed',storage_key:null,publish_status:'blocked'});const latest=seedReel(f,{source_url:source,status:'failed',storage_key:null,publish_status:'blocked'});
+  const intake=await f.request('/api/reels/intake',{method:'POST',body:{url:source,rightsConfirmed:true}});assert.equal(intake.status,202);assert.equal((await intake.json()).id,latest);await f.drain();
+  assert.equal(row(f,latest).status,'ready');assert.equal(row(f,first).status,'failed');assert.equal(downloads,1);
+  assert.equal((await f.request('/api/reels/'+first+'/retry',{method:'POST'})).status,409);assert.equal(downloads,1);
+});
+
 test('malformed JSON has a safe API error',async t=>{
   const f=await setup(t);const r=await f.request('/api/reels/intake',{method:'POST',body:'{'});assert.equal(r.status,400);assert.equal(r.headers.get('cache-control'),'no-store');
 });

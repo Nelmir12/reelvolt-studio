@@ -102,6 +102,9 @@ respostas incertas, conferir o resultado no Instagram antes de intervenções ma
   esse erro cair no executor autenticado. Os nomes históricos
   `GITHUB_WORKFLOW_ID` e `GITHUB_WORKFLOW_REF`, ainda presentes no Sites, seguem
   aceitos durante a migração.
+- Como os IDs 72 e 73 apontam para o mesmo link, a entrada agora reaproveita o
+  registro falho mais recente e impede que duas tentativas do mesmo Reel preparem
+  MP4s independentes.
 - A inspeção do GitHub mostrou que não houve execução do workflow em 10/09/2026,
   confirmando que os Reels 72 e 73 falharam antes do despacho. O último acionamento
   registrado foi concluído com sucesso em 24/08/2026; o segredo histórico de

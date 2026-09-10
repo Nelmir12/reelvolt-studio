@@ -1842,9 +1842,14 @@ async function queueReel(
   ctx: ExecutionContext,
 ): Promise<QueueResult> {
   const existing = await env.DB.prepare(
-    "SELECT id FROM reels WHERE source_url = ? AND archived_at IS NULL AND status <> 'failed' ORDER BY id DESC LIMIT 1",
-  ).bind(input.sourceUrl).first<{ id: number }>();
-  if (existing) return { accepted: false, reason: "duplicate", id: existing.id };
+    "SELECT id, status FROM reels WHERE source_url = ? AND archived_at IS NULL ORDER BY id DESC LIMIT 1",
+  ).bind(input.sourceUrl).first<{ id: number; status: string }>();
+  if (existing) {
+    if (existing.status === "failed" && await retryFailedReel(existing.id, env, ctx)) {
+      return { accepted: true, id: existing.id };
+    }
+    return { accepted: false, reason: "duplicate", id: existing.id };
+  }
 
   const publicToken = crypto.randomUUID();
   const initialPublishStatus = input.publicationMode === "download_only" ? "not_requested" : "awaiting_download";
@@ -2007,7 +2012,10 @@ async function retryFailedReel(id: number, env: Env, ctx: ExecutionContext) {
   const claimed = await env.DB.prepare(`UPDATE reels SET status = 'queued', error = NULL,
     publish_status = CASE WHEN publication_mode = 'download_only' THEN 'not_requested' ELSE 'awaiting_download' END,
     publish_error = NULL
-    WHERE id = ? AND archived_at IS NULL AND status = 'failed'`)
+    WHERE id = ? AND archived_at IS NULL AND status = 'failed'
+      AND NOT EXISTS (SELECT 1 FROM reels duplicate
+        WHERE duplicate.id <> reels.id AND duplicate.archived_at IS NULL
+          AND duplicate.source_url = reels.source_url AND duplicate.status <> 'failed')`)
     .bind(id)
     .run();
   if (!claimed.meta.changes) return false;
